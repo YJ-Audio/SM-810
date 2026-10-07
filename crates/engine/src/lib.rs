@@ -15,6 +15,12 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 pub enum Error {
 	#[error(transparent)]
+	Decode(#[from] sampler_decode::Error),
+	#[error(transparent)]
+	Analysis(#[from] sampler_analysis::Error),
+	#[error("serialization: {0}")]
+	Json(#[from] serde_json::Error),
+	#[error(transparent)]
 	Database(#[from] db::Error),
 	#[error(transparent)]
 	Scan(#[from] scan::Error),
@@ -331,3 +337,5 @@ pub struct ScanReport {
 	pub status: String,
 	pub errors: Vec<String>,
 }
+
+mod analysis_jobs;

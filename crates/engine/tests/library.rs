@@ -117,3 +117,63 @@ fn short_queries_and_punctuation_are_literal_and_pages_do_not_overlap() {
 		engine.search("", 1, 1).unwrap()[0].id
 	);
 }
+
+#[test]
+fn analysis_jobs_resume_and_preserve_manual_values_and_peaks() {
+	let dir = tempfile::tempdir().unwrap();
+	let source = dir.path().join("source");
+	fs::create_dir(&source).unwrap();
+	let path = source.join("tone_120bpm_Am.wav");
+	let mut writer = hound::WavWriter::create(
+		&path,
+		hound::WavSpec {
+			channels: 1,
+			sample_rate: 48000,
+			bits_per_sample: 16,
+			sample_format: hound::SampleFormat::Int,
+		},
+	)
+	.unwrap();
+	for i in 0..9600 {
+		writer
+			.write_sample(((i as f32 * 440.0 * std::f32::consts::TAU / 48000.0).sin() * 12000.0) as i16)
+			.unwrap();
+	}
+	writer.finalize().unwrap();
+	let db = dir.path().join("test.db");
+	let engine = Engine::open(&db).unwrap();
+	let root = engine.add_root(&source, "Test", Storage::Local).unwrap();
+	engine.scan(root).unwrap();
+	let id = engine.search("", 1, 0).unwrap()[0].id;
+	engine
+		.write(|tx| {
+			tx.execute("UPDATE jobs SET state='running',attempts=1 WHERE kind='analyze'", [])?;
+			Ok(())
+		})
+		.unwrap();
+	drop(engine);
+	let engine = Engine::open(&db).unwrap();
+	engine.analyze_pending(10).unwrap();
+	assert_eq!(engine.analysis(id).unwrap().unwrap().bpm, Some(120.0));
+	assert_eq!(engine.peaks(id).unwrap().len(), 512);
+	engine
+		.set_manual(id, Some(127.0), Some(4), Some("major".into()))
+		.unwrap();
+	engine
+		.write(move |tx| {
+			tx.execute("UPDATE analysis SET analyzer_ver=0 WHERE sample_id=?1", [id])?;
+			Ok(())
+		})
+		.unwrap();
+	engine.analyze_pending(10).unwrap();
+	let result = engine.analysis(id).unwrap().unwrap();
+	assert_eq!(result.bpm, Some(127.0));
+	assert_eq!(result.bpm_source.as_deref(), Some("manual"));
+	assert_eq!(result.key_root, Some(4));
+	assert_eq!(result.key_mode.as_deref(), Some("major"));
+	assert_eq!(result.key_source.as_deref(), Some("manual"));
+	assert_eq!(result.analyzer_ver, sampler_analysis::ANALYZER_VERSION);
+	drop(engine);
+	let engine = Engine::open(&db).unwrap();
+	assert_eq!(engine.peaks(id).unwrap().len(), 512);
+}

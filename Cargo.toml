@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/db", "crates/scan", "crates/engine"]
+members = ["crates/db", "crates/scan", "crates/engine", "crates/decode", "crates/analysis"]
 resolver = "3"
 
 [workspace.package]
@@ -9,6 +9,8 @@ license = "MIT"
 publish = false
 
 [workspace.dependencies]
+sampler-decode = { path = "crates/decode" }
+sampler-analysis = { path = "crates/analysis" }
 sampler-db = { path = "crates/db" }
 sampler-scan = { path = "crates/scan" }
 sampler-engine = { path = "crates/engine" }

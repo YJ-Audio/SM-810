@@ -1,5 +1,6 @@
+pub use rusqlite::OptionalExtension;
+use rusqlite::params;
 pub use rusqlite::{Connection, Transaction};
-use rusqlite::{OptionalExtension, params};
 use rusqlite_migration::{M, Migrations};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -10,6 +11,8 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum Error {
+	#[error("I/O: {0}")]
+	Io(#[from] std::io::Error),
 	#[error("database: {0}")]
 	Sql(#[from] rusqlite::Error),
 	#[error("migration: {0}")]
@@ -437,4 +440,82 @@ mod tests {
 		assert!(search(&db, "\" OR *", 10, 0).unwrap().is_empty());
 		assert!(search(&db, "%", 10, 0).unwrap().is_empty());
 	}
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AnalysisRecord {
+	pub analyzer_ver: i64,
+	pub duration_ms: i64,
+	pub sample_rate: u32,
+	pub channels: usize,
+	pub lufs: Option<f64>,
+	pub peak_dbfs: Option<f64>,
+	pub is_loop: Option<bool>,
+	pub bpm: Option<f64>,
+	pub bpm_source: Option<String>,
+	pub key_root: Option<u8>,
+	pub key_mode: Option<String>,
+	pub key_source: Option<String>,
+}
+pub fn analysis(db: &Connection, id: i64) -> Result<Option<AnalysisRecord>> {
+	Ok(db.query_row("SELECT analyzer_ver,duration_ms,sample_rate,channels,lufs,peak_dbfs,is_loop,bpm,bpm_source,key_root,key_mode,key_source FROM analysis WHERE sample_id=?1",[id],|r|Ok(AnalysisRecord {analyzer_ver:r.get(0)?,duration_ms:r.get(1)?,sample_rate:r.get(2)?,channels:r.get::<_,u32>(3)? as usize,lufs:r.get(4)?,peak_dbfs:r.get(5)?,is_loop:r.get(6)?,bpm:r.get(7)?,bpm_source:r.get(8)?,key_root:r.get(9)?,key_mode:r.get(10)?,key_source:r.get(11)?})).optional()?)
+}
+pub fn store_analysis(db: &Transaction<'_>, id: i64, a: &AnalysisRecord) -> Result<()> {
+	db.execute("INSERT INTO analysis(sample_id,analyzer_ver,duration_ms,sample_rate,channels,lufs,peak_dbfs,is_loop,bpm,bpm_source,key_root,key_mode,key_source) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13) ON CONFLICT(sample_id) DO UPDATE SET analyzer_ver=excluded.analyzer_ver,duration_ms=excluded.duration_ms,sample_rate=excluded.sample_rate,channels=excluded.channels,lufs=excluded.lufs,peak_dbfs=excluded.peak_dbfs,is_loop=excluded.is_loop,bpm=CASE WHEN analysis.bpm_source='manual' THEN analysis.bpm ELSE excluded.bpm END,bpm_source=CASE WHEN analysis.bpm_source='manual' THEN 'manual' ELSE excluded.bpm_source END,key_root=CASE WHEN analysis.key_source='manual' THEN analysis.key_root ELSE excluded.key_root END,key_mode=CASE WHEN analysis.key_source='manual' THEN analysis.key_mode ELSE excluded.key_mode END,key_source=CASE WHEN analysis.key_source='manual' THEN 'manual' ELSE excluded.key_source END",params![id,a.analyzer_ver,a.duration_ms,a.sample_rate,a.channels as i64,a.lufs,a.peak_dbfs,a.is_loop,a.bpm,a.bpm_source,a.key_root,a.key_mode,a.key_source])?;
+	Ok(())
+}
+pub fn set_manual(db: &Transaction<'_>, id: i64, bpm: Option<f64>, key: Option<u8>, mode: Option<&str>) -> Result<()> {
+	if bpm.is_some_and(|v| !v.is_finite() || !(20.0..=400.0).contains(&v))
+		|| key.is_some_and(|v| v > 11)
+		|| mode.is_some_and(|v| !matches!(v, "major" | "minor"))
+	{
+		return Err(Error::Invalid("invalid BPM or key".into()));
+	}
+	if analysis(db, id)?.is_none() {
+		return Err(Error::Invalid("sample has not been analyzed".into()));
+	}
+	if let Some(bpm) = bpm {
+		db.execute(
+			"UPDATE analysis SET bpm=?1,bpm_source='manual' WHERE sample_id=?2",
+			params![bpm, id],
+		)?;
+	}
+	if let Some(key) = key {
+		db.execute(
+			"UPDATE analysis SET key_root=?1,key_mode=?2,key_source='manual' WHERE sample_id=?3",
+			params![key, mode, id],
+		)?;
+	}
+	Ok(())
+}
+#[derive(Debug, Clone)]
+pub struct Job {
+	pub sample_id: i64,
+	pub kind: String,
+}
+pub fn claim_analysis_job(db: &Transaction<'_>) -> Result<Option<Job>> {
+	let job=db.query_row("SELECT sample_id,kind FROM jobs j WHERE state='pending' AND (kind='analyze' OR (kind='peaks' AND NOT EXISTS(SELECT 1 FROM jobs a WHERE a.sample_id=j.sample_id AND a.kind='analyze' AND a.state IN ('pending','running')))) ORDER BY priority DESC,sample_id LIMIT 1",[],|r|Ok(Job {sample_id:r.get(0)?,kind:r.get(1)?})).optional()?;
+	if let Some(job) = &job {
+		db.execute(
+			"UPDATE jobs SET state='running',attempts=attempts+1 WHERE sample_id=?1 AND kind=?2",
+			params![job.sample_id, job.kind],
+		)?;
+	}
+	Ok(job)
+}
+pub fn finish_job(db: &Transaction<'_>, job: &Job, error: Option<&str>) -> Result<()> {
+	db.execute(
+		"UPDATE jobs SET state=?1,error=?2 WHERE sample_id=?3 AND kind=?4",
+		params![
+			if error.is_some() { "failed" } else { "done" },
+			error,
+			job.sample_id,
+			job.kind
+		],
+	)?;
+	Ok(())
+}
+pub fn requeue_old_analysis(db: &Transaction<'_>, version: i64) -> Result<()> {
+	db.execute("UPDATE jobs SET state='pending',error=NULL WHERE kind='analyze' AND sample_id IN (SELECT sample_id FROM analysis WHERE analyzer_ver<?1)",[version])?;
+	Ok(())
 }

@@ -22,6 +22,23 @@ enum Storage {
 }
 #[derive(Subcommand)]
 enum Command {
+	Analyze {
+		#[arg(long,default_value_t=usize::MAX)]
+		limit: usize,
+	},
+	Metadata {
+		sample: i64,
+	},
+	SetMetadata {
+		sample: i64,
+		#[arg(long)]
+		bpm: Option<f64>,
+		#[arg(long)]
+		key: Option<u8>,
+		#[arg(long)]
+		mode: Option<String>,
+	},
+	RetryFailed,
 	Init,
 	AddRoot {
 		path: PathBuf,
@@ -70,6 +87,10 @@ fn main() -> Result<()> {
 	})?;
 	let engine = Engine::open(&path)?;
 	match cli.command {
+		Command::Analyze { limit } => println!("Processed {} analysis jobs", engine.analyze_pending(limit)?),
+		Command::Metadata { sample } => println!("{}", serde_json::to_string_pretty(&engine.analysis(sample)?)?),
+		Command::SetMetadata { sample, bpm, key, mode } => engine.set_manual(sample, bpm, key, mode)?,
+		Command::RetryFailed => engine.retry_failed()?,
 		Command::Init => println!("{}", path.display()),
 		Command::AddRoot { path, label, storage } => {
 			let label = label.unwrap_or_else(|| path.file_name().unwrap_or_default().to_string_lossy().into_owned());

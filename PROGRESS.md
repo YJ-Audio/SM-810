@@ -12,9 +12,19 @@
 
 DB: OS アプリデータ領域の `studio.poti.sampler/library.sqlite3`。元ファイルに書き込む API は使用していない。
 
+## 2026-10-07 — マイルストーン2
+
+- [x] symphonia 0.6.1 (gapless)、rubato 5.0.1。全体 / 先頭デコード、モノラル化、指定レートへの変換。
+- [x] 長さ・LUFS・ピーク・acid / smpl・ファイル名の BPM / キー、ループ判定、テンポ推定、FFT によるルート / クロマ推定。
+- [x] 256ビンの min/max を i8 で peaks.pack に追記し、永続化後にDBへ登録。
+- [x] CPUコア数−1の解析ワーカー、単一 writer、古い analyzer_ver の再解析、失敗ジョブの明示的再試行。
+- [x] 実ライブラリ解析プロセスを実際に強制終了。running 9件が残り、再起動後 pending に回収され、running 0件になった。累計200件解析済み、解析失敗0件。
+- [x] manual BPM / キー / モードの再解析後保持、再起動後の波形パック読み出し、合成 WAV のデコードとリサンプル、短い音のLUFS、RIFF奇数チャンクのパディングと不正長をテスト。
+- [x] Rust テスト13件、Clippy warnings-as-errors 通過。
+
 ## 次の作業
 
-マイルストーン2: symphonia / rubato の独立 decode クレート、解析、波形パック、再開可能なジョブワーカー。
+マイルストーン3: cpal / rtrb の再生、Tauri 2 + Svelte 5 の画像に沿ったリストUI、トランスポート、永続スライス書き出しとネイティブドラッグ。
 
 ## 未検証・後続段階
 

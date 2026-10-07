@@ -2,7 +2,7 @@
 
 DTM 用サンプルマネージャー。仕様は [SPEC.md](SPEC.md)、現在の実装状況と計測値は [PROGRESS.md](PROGRESS.md)、設計判断は [DECISIONS.md](DECISIONS.md) を参照してください。
 
-現在は Rust workspace と読み取り専用ライブラリ走査・検索 CLI を実装しています。UI と音声解析は後続マイルストーンです。
+現在は読み取り専用ライブラリ走査・検索、音声デコード・解析、永続波形キャッシュ、再開可能なジョブ処理を実装しています。UI は後続マイルストーンです。
 
 ## 開発
 
@@ -25,6 +25,10 @@ cargo run --release -- roots
 cargo run --release -- search kick --limit 25
 cargo run --release -- tag 1 'Drums/kick'
 cargo run --release -- verify
+cargo run --release -- analyze
+cargo run --release -- metadata 1
+cargo run --release -- set-metadata 1 --bpm 124 --key 8
+cargo run --release -- retry-failed
 cargo run --release -- jobs
 cargo run --release -- watch 1
 ```
