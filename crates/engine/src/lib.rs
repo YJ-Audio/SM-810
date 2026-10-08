@@ -2,6 +2,7 @@ use sampler_db::{self as db, Root, Sample, Storage};
 use sampler_scan as scan;
 use serde::Serialize;
 use std::{
+	fs::{File, OpenOptions},
 	path::{Path, PathBuf},
 	sync::{
 		Mutex,
@@ -14,6 +15,10 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum Error {
+	#[error(transparent)]
+	Audio(#[from] sampler_audio::Error),
+	#[error("WAV export: {0}")]
+	Wav(#[from] hound::Error),
 	#[error(transparent)]
 	Decode(#[from] sampler_decode::Error),
 	#[error(transparent)]
@@ -41,6 +46,7 @@ struct Request {
 }
 
 pub struct Engine {
+	_process_lock: File,
 	path: PathBuf,
 	sender: Option<SyncSender<Request>>,
 	writer: Option<JoinHandle<()>>,
@@ -53,6 +59,20 @@ impl Engine {
 		if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
 			std::fs::create_dir_all(parent)?;
 		}
+		let mut lock_path = path.as_os_str().to_owned();
+		lock_path.push(".lock");
+		let process_lock = OpenOptions::new()
+			.create(true)
+			.truncate(false)
+			.read(true)
+			.write(true)
+			.open(lock_path)?;
+		process_lock.try_lock().map_err(|error| {
+			Error::Invalid(format!(
+				"Cannot exclusively open library {}; close other Sampler or CLI instances: {error}",
+				path.display()
+			))
+		})?;
 		let (sender, receiver) = mpsc::sync_channel::<Request>(32);
 		let (ready_tx, ready_rx) = mpsc::sync_channel(1);
 		let writer_path = path.clone();
@@ -90,6 +110,7 @@ impl Engine {
 		})?;
 		ready_rx.recv().map_err(|_| Error::WriterStopped)??;
 		Ok(Self {
+			_process_lock: process_lock,
 			path,
 			sender: Some(sender),
 			writer: Some(writer),
@@ -339,3 +360,6 @@ pub struct ScanReport {
 }
 
 mod analysis_jobs;
+
+pub mod audition;
+mod desktop;

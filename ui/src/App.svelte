@@ -1,0 +1,1199 @@
+<script lang="ts">
+  import { onMount } from 'svelte';
+  import { invoke, isTauri } from '@tauri-apps/api/core';
+  import { listen } from '@tauri-apps/api/event';
+  import { open } from '@tauri-apps/plugin-dialog';
+  import { startDrag } from '@crabnebula/tauri-plugin-drag';
+  import Icon from './Icon.svelte';
+  import Waveform from './Waveform.svelte';
+  import { keys, kind, parseSearch } from './types';
+  import type {
+    Sample,
+    Page,
+    Root,
+    Tag,
+    Job,
+    Bootstrap,
+    Wave,
+    Playback,
+  } from './types';
+
+  let roots = $state<Root[]>([]),
+    tags = $state<Tag[]>([]),
+    jobs = $state<Job[]>([]);
+  let rows = $state<Sample[]>([]),
+    total = $state(0),
+    offset = $state(0),
+    loading = $state(true),
+    analyzing = $state(false);
+  let query = $state(''),
+    activeRoot = $state<number | null>(null),
+    tagFilter = $state<string | null>(null);
+  let mode = $state<'list' | 'map'>('list'),
+    selected = $state<Sample | null>(null),
+    selection = $state<number[]>([]),
+    anchor = $state(0);
+  let wave = $state<Wave | null>(null),
+    sliceStart = $state(0),
+    sliceEnd = $state(0),
+    slicePath = $state<string | null>(null),
+    preparing = $state(false);
+  let playback = $state<Playback>({
+    sample_id: 0,
+    seconds: 0,
+    playing: false,
+    error: null,
+  });
+  let matchLufs = $state(true),
+    semitones = $state(0),
+    targetLufs = $state(-16),
+    error = $state(''),
+    busy = $state('');
+  let columnsOpen = $state(false),
+    showBpm = $state(false),
+    showTags = $state(true),
+    showRoot = $state(true);
+  let searchInput = $state<HTMLInputElement>(undefined!),
+    scroller = $state<HTMLDivElement>(undefined!),
+    dialog = $state<HTMLDialogElement>(undefined!),
+    waveBox = $state<HTMLDivElement>(undefined!);
+  let dialogMode = $state<'tag' | 'settings' | 'source'>('tag'),
+    tagName = $state(''),
+    sourcePath = $state(''),
+    sourceLabel = $state(''),
+    storage = $state('local');
+  let metaBpm = $state(''),
+    metaKey = $state(''),
+    metaMode = $state('');
+  let request = 0,
+    detailRequest = 0,
+    sliceRequest = 0,
+    searchTimer: ReturnType<typeof setTimeout>,
+    scrollTimer: ReturnType<typeof setTimeout>;
+  let prefetchAt = 0;
+  const rowHeight = 44,
+    pageSize = 180;
+  let parsed = $derived(parseSearch(query));
+  let activeTag = $derived(tagFilter ?? parsed.tag);
+  let selectedKind = $derived(selected ? kind(selected) : null);
+  let analysisTotal = $derived(
+    jobs.filter((j) => j.kind === 'analyze').reduce((n, j) => n + j.count, 0),
+  );
+  let analysisDone = $derived(
+    jobs
+      .filter((j) => j.kind === 'analyze' && j.state === 'done')
+      .reduce((n, j) => n + j.count, 0),
+  );
+  let analysisFailed = $derived(
+    jobs
+      .filter((j) => j.kind === 'analyze' && j.state === 'failed')
+      .reduce((n, j) => n + j.count, 0),
+  );
+  let viewportWidth = $state(1480);
+  let columnTemplate = $derived(
+    viewportWidth <= 1200
+      ? `65px minmax(100px,1.7fr) ${showTags ? 'minmax(60px,1fr) ' : ''}${showRoot ? '40px ' : ''}55px 45px${showBpm ? ' 45px' : ''}`
+      : `112px minmax(170px,1.7fr) ${showTags ? 'minmax(100px,1fr) ' : ''}${showRoot ? '64px ' : ''}80px 75px${showBpm ? ' 65px' : ''}`,
+  );
+  let progress = $derived(
+    selected && wave && playback.sample_id === selected.id
+      ? Math.min(
+          1,
+          (playback.seconds * Math.pow(2, semitones / 12)) /
+            (wave.frames / wave.sample_rate),
+        )
+      : 0,
+  );
+  const count = (n: number) => n.toLocaleString();
+  const decimal = (n: number | null | undefined, d = 1) =>
+    n == null ? '—' : n.toFixed(d);
+  const settings = () => ({
+    match_lufs: matchLufs,
+    semitones,
+    target_lufs: targetLufs,
+  });
+  const fail = (e: unknown) => {
+    error = String(e);
+  };
+  const browseQuery = (start = 0, limit = pageSize) => ({
+    text: parsed.text,
+    tag: activeTag,
+    root_id: activeRoot,
+    offset: start,
+    limit,
+  });
+
+  async function refreshStatus() {
+    const data = await invoke<Bootstrap>('bootstrap');
+    roots = data.roots;
+    tags = data.tags;
+    jobs = data.jobs;
+    analyzing = data.analyzing;
+    if (data.audio_error) error = data.audio_error;
+  }
+  async function load(start = 0) {
+    const revision = ++request;
+    loading = true;
+    try {
+      const page = await invoke<Page>('browse', { query: browseQuery(start) });
+      if (revision !== request) return;
+      rows = page.items;
+      total = page.total;
+      offset = start;
+      if (selected) {
+        const updated = rows.find((r) => r.id === selected?.id);
+        if (updated) selected = updated;
+      }
+    } catch (e) {
+      if (revision === request) {
+        fail(e);
+        rows = [];
+        total = 0;
+      }
+    } finally {
+      if (revision === request) loading = false;
+    }
+  }
+  function searchChanged() {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => {
+      if (scroller) scroller.scrollTop = 0;
+      void load();
+    }, 160);
+  }
+  function filterRoot(id: number | null) {
+    activeRoot = id;
+    if (scroller) scroller.scrollTop = 0;
+    void load();
+  }
+  function filterTag(name: string | null) {
+    tagFilter = name;
+    if (scroller) scroller.scrollTop = 0;
+    void load();
+  }
+  function scroll() {
+    clearTimeout(scrollTimer);
+    scrollTimer = setTimeout(() => {
+      const top = Math.floor(scroller.scrollTop / rowHeight);
+      if (top < offset || top > offset + pageSize - 40)
+        void load(Math.max(0, top - 30));
+    }, 50);
+  }
+  function prefetch(index: number) {
+    if (Date.now() - prefetchAt < 150) return;
+    prefetchAt = Date.now();
+    const ids = [index, index + 1, index - 1, index + 2]
+      .map((i) => rows[i - offset])
+      .filter((sample) => sample?.available)
+      .map((sample) => sample.id);
+    void invoke('prefetch', { ids, settings: settings() }).catch(() => {});
+  }
+  function play(sample: Sample | null = selected) {
+    if (!sample) return;
+    if (!sample.available) {
+      error = 'This sample is offline. Reconnect its source and rescan.';
+      return;
+    }
+    void invoke('audition', { id: sample.id, settings: settings() }).catch(
+      fail,
+    );
+  }
+  function stop() {
+    void invoke('audition', { id: null, settings: settings() }).catch(fail);
+  }
+  async function select(sample: Sample, index: number, range = false) {
+    const revision = ++detailRequest;
+    if (range) {
+      try {
+        const page = await invoke<Page>('browse', {
+          query: browseQuery(
+            Math.min(anchor, index),
+            Math.abs(index - anchor) + 1,
+          ),
+        });
+        if (revision !== detailRequest) return;
+        selection = page.items.map((r) => r.id);
+      } catch (e) {
+        fail(e);
+      }
+    } else {
+      selection = [sample.id];
+      anchor = index;
+    }
+    if (revision !== detailRequest) return;
+    ++sliceRequest;
+    selected = sample;
+    wave = null;
+    slicePath = null;
+    preparing = false;
+    metaBpm = sample.analysis?.bpm?.toString() ?? '';
+    metaKey = sample.analysis?.key_root?.toString() ?? '';
+    metaMode = sample.analysis?.key_mode ?? '';
+    play(sample);
+    if (!sample.available) return;
+    try {
+      const result = await invoke<Wave>('waveform', { id: sample.id });
+      if (revision !== detailRequest) return;
+      wave = result;
+      sliceStart = 0;
+      sliceEnd = result.frames;
+    } catch (e) {
+      if (revision === detailRequest) fail(e);
+    }
+  }
+  async function moveSelection(delta: number) {
+    const current = rows.findIndex((r) => r.id === selected?.id);
+    const index = Math.max(
+      0,
+      Math.min(total - 1, current >= 0 ? offset + current + delta : 0),
+    );
+    let sample = rows[index - offset];
+    if (!sample) {
+      const page = await invoke<Page>('browse', {
+        query: browseQuery(Math.max(0, index - 30)),
+      });
+      rows = page.items;
+      offset = Math.max(0, index - 30);
+      sample = rows[index - offset];
+    }
+    if (sample) {
+      void select(sample, index);
+      prefetch(index);
+      if (scroller) {
+        if (index * rowHeight < scroller.scrollTop)
+          scroller.scrollTop = index * rowHeight;
+        else if (
+          (index + 1) * rowHeight >
+          scroller.scrollTop + scroller.clientHeight
+        )
+          scroller.scrollTop = (index + 1) * rowHeight - scroller.clientHeight;
+      }
+    }
+  }
+  function keyboard(event: KeyboardEvent) {
+    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+      event.preventDefault();
+      searchInput?.focus();
+      return;
+    }
+    if (
+      dialog?.open ||
+      (event.target instanceof HTMLElement &&
+        ['INPUT', 'TEXTAREA', 'SELECT'].includes(event.target.tagName))
+    )
+      return;
+    if (event.code === 'Space') {
+      event.preventDefault();
+      if (playback.playing) stop();
+      else play();
+    }
+    if (event.key === 'Escape') {
+      ++detailRequest;
+      ++sliceRequest;
+      selected = null;
+      selection = [];
+      wave = null;
+      slicePath = null;
+      stop();
+    }
+    if (
+      mode === 'list' &&
+      (event.key === 'ArrowDown' || event.key === 'ArrowUp')
+    ) {
+      event.preventDefault();
+      void moveSelection(event.key === 'ArrowDown' ? 1 : -1).catch(fail);
+    }
+  }
+  async function chooseSource() {
+    try {
+      const path = await open({
+        directory: true,
+        multiple: false,
+        title: 'Add a sample source',
+      });
+      if (typeof path !== 'string') return;
+      sourcePath = path;
+      sourceLabel = path.split(/[\\/]/).filter(Boolean).at(-1) ?? 'Samples';
+      dialogMode = 'source';
+      dialog.showModal();
+    } catch (e) {
+      fail(e);
+    }
+  }
+  async function addSource() {
+    dialog.close();
+    busy = 'Scanning source…';
+    try {
+      await invoke('add_source', {
+        path: sourcePath,
+        label: sourceLabel,
+        storage,
+      });
+      await refreshStatus();
+      await load();
+    } catch (e) {
+      fail(e);
+    } finally {
+      busy = '';
+    }
+  }
+  async function scanSource(id: number) {
+    busy = 'Scanning source…';
+    try {
+      await invoke('rescan', { id });
+      await refreshStatus();
+      await load(offset);
+    } catch (e) {
+      fail(e);
+    } finally {
+      busy = '';
+    }
+  }
+  async function analyze() {
+    try {
+      await invoke('start_analysis');
+      analyzing = true;
+    } catch (e) {
+      fail(e);
+    }
+  }
+  function openTag() {
+    if (!selection.length) return;
+    tagName = '';
+    dialogMode = 'tag';
+    dialog.showModal();
+  }
+  async function saveTag() {
+    if (!tagName.trim()) return;
+    dialog.close();
+    try {
+      await invoke('edit_tag', {
+        ids: selection,
+        name: tagName.trim().replace(/^#/, ''),
+        remove: false,
+      });
+      await refreshStatus();
+      await load(offset);
+    } catch (e) {
+      fail(e);
+    }
+  }
+  async function removeTag(name: string) {
+    if (!selected) return;
+    const id = selected.id;
+    try {
+      await invoke('edit_tag', { ids: [id], name, remove: true });
+      await refreshStatus();
+      await load(offset);
+      if (selected?.id === id)
+        selected = {
+          ...selected,
+          tags: selected.tags.filter((t) => t !== name),
+        };
+    } catch (e) {
+      fail(e);
+    }
+  }
+  async function saveMetadata() {
+    if (!selected) return;
+    try {
+      await invoke('edit_metadata', {
+        id: selected.id,
+        bpm: metaBpm ? Number(metaBpm) : null,
+        key: metaKey !== '' ? Number(metaKey) : null,
+        mode: metaMode || null,
+      });
+      await load(offset);
+    } catch (e) {
+      fail(e);
+    }
+  }
+  function dragImage(name: string) {
+    const canvas = document.createElement('canvas');
+    canvas.width = 280;
+    canvas.height = 48;
+    const ctx = canvas.getContext('2d')!;
+    ctx.fillStyle = '#24282d';
+    ctx.fillRect(0, 0, 280, 48);
+    ctx.fillStyle = '#ffbd47';
+    ctx.beginPath();
+    ctx.arc(20, 24, 5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#f0f1f3';
+    ctx.font = '13px monospace';
+    ctx.fillText(name.slice(0, 27), 36, 29);
+    return canvas.toDataURL('image/png');
+  }
+  async function dragFile(sample: Sample, slice = false) {
+    if (!sample.available) return;
+    try {
+      const path = slice
+        ? slicePath
+        : await invoke<string>('prepare_drag', {
+            id: sample.id,
+            start: null,
+            end: null,
+          });
+      if (path)
+        await startDrag({
+          item: [path],
+          icon: dragImage(sample.name),
+          mode: 'copy',
+        });
+    } catch (e) {
+      fail(e);
+    }
+  }
+  function beginDrag(event: PointerEvent, sample: Sample, slice = false) {
+    if (event.button !== 0 || !sample.available || (slice && !slicePath))
+      return;
+    const x = event.clientX,
+      y = event.clientY;
+    const cleanup = () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', cleanup);
+      window.removeEventListener('pointercancel', cleanup);
+    };
+    const move = (e: PointerEvent) => {
+      if (Math.hypot(e.clientX - x, e.clientY - y) > 5) {
+        cleanup();
+        void dragFile(sample, slice);
+      }
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', cleanup, { once: true });
+    window.addEventListener('pointercancel', cleanup, { once: true });
+  }
+  async function prepareSlice(snap = true) {
+    if (!selected || !wave) return;
+    const revision = ++sliceRequest;
+    const id = selected.id;
+    preparing = true;
+    slicePath = null;
+    try {
+      const [start, end] = snap
+        ? await invoke<[number, number]>('snap_slice', {
+            id,
+            start: sliceStart,
+            end: sliceEnd,
+          })
+        : [sliceStart, sliceEnd];
+      if (revision !== sliceRequest) return;
+      sliceStart = start;
+      sliceEnd = end;
+      const path = await invoke<string>('prepare_drag', { id, start, end });
+      if (revision === sliceRequest) slicePath = path;
+    } catch (e) {
+      if (revision === sliceRequest) fail(e);
+    } finally {
+      if (revision === sliceRequest) preparing = false;
+    }
+  }
+  function moveHandle(event: PointerEvent, edge: 'start' | 'end') {
+    if (!wave) return;
+    event.preventDefault();
+    event.stopPropagation();
+    ++sliceRequest;
+    slicePath = null;
+    const target = event.currentTarget as HTMLElement;
+    target.focus();
+    target.setPointerCapture(event.pointerId);
+    const move = (e: PointerEvent) => {
+      if (!wave) return;
+      const rect = waveBox.getBoundingClientRect();
+      const frame = Math.round(
+        Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width)) *
+          wave.frames,
+      );
+      if (edge === 'start') sliceStart = Math.min(frame, sliceEnd - 1);
+      else sliceEnd = Math.max(frame, sliceStart + 1);
+    };
+    const end = () => {
+      target.removeEventListener('pointermove', move);
+      target.removeEventListener('pointerup', end);
+      target.removeEventListener('pointercancel', end);
+      void prepareSlice();
+    };
+    target.addEventListener('pointermove', move);
+    target.addEventListener('pointerup', end);
+    target.addEventListener('pointercancel', end);
+  }
+  function adjustHandle(event: KeyboardEvent, edge: 'start' | 'end') {
+    if (!wave || !['ArrowLeft', 'ArrowRight'].includes(event.key)) return;
+    event.preventDefault();
+    const step =
+      (event.altKey
+        ? 1
+        : Math.max(
+            1,
+            Math.round(wave.sample_rate * (event.shiftKey ? 0.1 : 0.01)),
+          )) * (event.key === 'ArrowLeft' ? -1 : 1);
+    if (edge === 'start')
+      sliceStart = Math.max(0, Math.min(sliceEnd - 1, sliceStart + step));
+    else
+      sliceEnd = Math.min(
+        wave.frames,
+        Math.max(sliceStart + 1, sliceEnd + step),
+      );
+    void prepareSlice(!event.altKey);
+  }
+  function saveSettings() {
+    localStorage.setItem('sampler-audition', JSON.stringify(settings()));
+    dialog.close();
+  }
+  onMount(() => {
+    if (!isTauri()) {
+      loading = false;
+      error = 'Open Sampler as a desktop app to access your audio library.';
+      return;
+    }
+    try {
+      const saved = JSON.parse(
+        localStorage.getItem('sampler-audition') ?? 'null',
+      );
+      if (saved) {
+        matchLufs = saved.match_lufs ?? true;
+        targetLufs = Math.max(
+          -36,
+          Math.min(-6, Number(saved.target_lufs) || -16),
+        );
+      }
+    } catch {
+      /* Ignore stale local audition preferences. */
+    }
+    void refreshStatus()
+      .then(() => load())
+      .catch(fail);
+    let disposed = false;
+    const unlisten: (() => void)[] = [];
+    let lastAnalysisRefresh = 0;
+    for (const event of ['library-updated', 'analysis-progress']) {
+      void listen(event, () => {
+        void refreshStatus().catch(fail);
+        if (
+          event === 'library-updated' ||
+          Date.now() - lastAnalysisRefresh > 5000
+        ) {
+          lastAnalysisRefresh = Date.now();
+          void load(offset);
+        }
+      }).then((off) => {
+        if (disposed) off();
+        else unlisten.push(off);
+      });
+    }
+    let polling = false;
+    const interval = setInterval(() => {
+      if (polling) return;
+      polling = true;
+      void invoke<Playback>('playback_status')
+        .then((status) => {
+          playback = status;
+          if (status.error) error = status.error;
+        })
+        .catch(fail)
+        .finally(() => (polling = false));
+    }, 60);
+    return () => {
+      disposed = true;
+      clearInterval(interval);
+      clearTimeout(searchTimer);
+      clearTimeout(scrollTimer);
+      unlisten.forEach((off) => off());
+    };
+  });
+</script>
+
+{#snippet tagTree(parent: number | null, depth = 0, prefix = '')}
+  {#each tags.filter((t) => t.parent_id === parent) as tag}
+    {@const path = prefix ? prefix + '/' + tag.name : tag.name}
+    <button
+      class="tag-row"
+      class:active={activeTag === path}
+      style:padding-left={`${9 + depth * 12}px`}
+      onclick={() => filterTag(activeTag === path ? null : path)}
+      ><span
+        >{#if depth}<i
+            class="dot"
+            style:background={kind({ name: tag.name, tags: [] }).color}
+          ></i>{/if}{tag.name}</span
+      ><span class="count">{tag.count || ''}</span></button
+    >
+    {@render tagTree(tag.id, depth + 1, path)}
+  {/each}
+{/snippet}
+
+<svelte:window onkeydown={keyboard} bind:innerWidth={viewportWidth} />
+<div class="app-shell">
+  <header class="topbar">
+    <button
+      class="brand"
+      onclick={() => {
+        mode = 'list';
+        query = '';
+        filterRoot(null);
+        filterTag(null);
+      }}
+      aria-label="Show full library"
+      ><span class="brand-mark"><i></i><i></i><i></i><i></i><i></i></span
+      ><strong>Library</strong></button
+    >
+    <nav class="view-switch" aria-label="Library view">
+      <button class:chosen={mode === 'map'} onclick={() => (mode = 'map')}
+        >Map</button
+      ><button class:chosen={mode === 'list'} onclick={() => (mode = 'list')}
+        >List</button
+      >
+    </nav>
+    <div class="search">
+      <Icon name="search" />{#if activeTag}<button
+          class="search-chip"
+          onclick={() => {
+            query = query.replace(/(?:^|\s)#[^\s]+/g, '').trim();
+            filterTag(null);
+          }}>#{activeTag}<Icon name="close" size={12} /></button
+        >{/if}<input
+        bind:this={searchInput}
+        bind:value={query}
+        oninput={searchChanged}
+        placeholder="Name, #tag, or describe a sound…"
+        aria-label="Search samples"
+      /><kbd>⌘ K</kbd>
+    </div>
+    <button
+      class="link-button"
+      disabled
+      title="Tempo synchronization is not available yet"
+      ><Icon name="link" size={15} />Link <span>—</span></button
+    >
+    <button
+      class="match-button"
+      class:enabled={matchLufs}
+      aria-pressed={matchLufs}
+      onclick={() => (matchLufs = !matchLufs)}>Match LUFS</button
+    >
+    <div class="pitch">
+      <button
+        aria-label="Transpose down one semitone"
+        disabled={semitones <= -24}
+        onclick={() => semitones--}>−</button
+      ><span>{semitones > 0 ? '+' : ''}{semitones} st</span><button
+        aria-label="Transpose up one semitone"
+        disabled={semitones >= 24}
+        onclick={() => semitones++}>+</button
+      >
+    </div>
+    <button
+      class="icon-button settings"
+      aria-label="Audition settings"
+      onclick={() => {
+        dialogMode = 'settings';
+        dialog.showModal();
+      }}><Icon name="settings" /></button
+    >
+  </header>
+
+  <aside class="sidebar" aria-label="Library filters">
+    <div class="sidebar-scroll">
+      <section>
+        <div class="section-heading">
+          <h2>Sources</h2>
+          <button
+            class="icon-button"
+            onclick={chooseSource}
+            aria-label="Add source"><Icon name="plus" size={15} /></button
+          >
+        </div>
+        <button
+          class="source-row"
+          class:active={activeRoot === null}
+          onclick={() => filterRoot(null)}
+          ><span>All sources</span><span class="count"
+            >{count(roots.reduce((n, r) => n + r.files, 0))}</span
+          ></button
+        >
+        {#each roots as root}<div class="source-line">
+            <button
+              class="source-row"
+              class:active={activeRoot === root.id}
+              onclick={() => filterRoot(root.id)}
+              title={root.path}
+              ><span class="source-label"
+                >{root.label}{#if root.storage !== 'local'}<small
+                    >{root.storage === 'external' ? 'EXT' : 'NET'}</small
+                  >{/if}{#if root.status === 'offline'}<small class="offline"
+                    >OFFLINE</small
+                  >{/if}</span
+              ><span class="count">{count(root.files)}</span></button
+            ><button
+              class="source-refresh icon-button"
+              aria-label={`Rescan ${root.label}`}
+              title="Rescan source"
+              onclick={() => scanSource(root.id)}
+              disabled={!!busy || analyzing}
+              ><Icon name="refresh" size={13} /></button
+            >
+          </div>{/each}
+        {#if !roots.length}<button
+            class="add-source-empty"
+            onclick={chooseSource}
+            ><Icon name="folder" />Add your sample folders</button
+          >{/if}
+      </section>
+      <section>
+        <div class="section-heading">
+          <h2>Tags</h2>
+          <button
+            class="icon-button"
+            disabled={!selected}
+            onclick={openTag}
+            aria-label="Tag selection"><Icon name="plus" size={15} /></button
+          >
+        </div>
+        {#if !tags.length}<p class="sidebar-empty">
+            Select a sound to add your first tag.
+          </p>{/if}
+        {@render tagTree(null)}
+      </section>
+      <section>
+        <div class="section-heading"><h2>Collections</h2></div>
+        <p class="sidebar-empty">
+          Your saved groups of sounds.<br /><span class="muted"
+            >Collections are not available yet.</span
+          >
+        </p>
+      </section>
+    </div>
+    <div class="analysis-status">
+      <div>
+        <span class:analyzing
+          >{busy || (analyzing ? 'Analyzing' : 'Library analysis')}</span
+        ><span class="mono">{count(analysisDone)} / {count(analysisTotal)}</span
+        >
+      </div>
+      <div class="progress-track">
+        <div
+          style:width={`${analysisTotal ? (analysisDone / analysisTotal) * 100 : 0}%`}
+        ></div>
+      </div>
+      <div class="analysis-caption">
+        <span
+          >{analysisFailed
+            ? `${analysisFailed} failed`
+            : analyzing
+              ? 'Loudness · key · waveforms'
+              : 'Audio metadata & waveforms'}</span
+        ><button
+          onclick={analyze}
+          disabled={analyzing ||
+            !!busy ||
+            !analysisTotal ||
+            analysisDone === analysisTotal}
+          >{analyzing ? 'Running' : 'Analyze'}</button
+        >
+      </div>
+    </div>
+  </aside>
+
+  <main class="workspace">
+    <div class="list-toolbar">
+      <div class="result-count">
+        <strong>{count(total)}</strong> samples{#if activeRoot}<span
+            >· {roots.find((r) => r.id === activeRoot)?.label}</span
+          >{/if}{#if activeTag}<span>· #{activeTag}</span
+          >{/if}{#if loading}<span class="loading-dot"></span>{/if}
+      </div>
+      <div class="toolbar-actions">
+        <span class="sort-label">Sort: Name <span>↑</span></span>
+        <div class="column-control">
+          <button
+            class="outline-button"
+            onclick={() => (columnsOpen = !columnsOpen)}
+            >Columns <Icon name="settings" size={14} /></button
+          >{#if columnsOpen}<div class="popover">
+              <label
+                ><input type="checkbox" bind:checked={showTags} />Tags</label
+              ><label
+                ><input type="checkbox" bind:checked={showRoot} />Root</label
+              ><label><input type="checkbox" bind:checked={showBpm} />BPM</label
+              >
+            </div>{/if}
+        </div>
+      </div>
+    </div>
+    {#if mode === 'list'}
+      <div class="table-header" style:grid-template-columns={columnTemplate}>
+        <span>Wave</span><span>Name</span>{#if showTags}<span>Tags</span
+          >{/if}{#if showRoot}<span>Root</span>{/if}<span>Length</span><span
+          >LUFS</span
+        >{#if showBpm}<span>BPM</span>{/if}
+      </div>
+      <div
+        class="sample-list"
+        bind:this={scroller}
+        onscroll={scroll}
+        role="listbox"
+        tabindex="0"
+        aria-label="Audio samples"
+        aria-multiselectable="true"
+      >
+        <div class="virtual-space" style:height={`${total * rowHeight}px`}>
+          {#each rows as sample, i (sample.id)}{@const color =
+              kind(sample).color}<button
+              role="option"
+              aria-selected={selection.includes(sample.id)}
+              class="sample-row"
+              class:selected={selection.includes(sample.id)}
+              class:playing={playback.playing &&
+                playback.sample_id === sample.id}
+              class:unavailable={!sample.available}
+              style:top={`${(offset + i) * rowHeight}px`}
+              style:grid-template-columns={columnTemplate}
+              onpointerenter={() => prefetch(offset + i)}
+              onfocus={() => prefetch(offset + i)}
+              ondblclick={() => play(sample)}
+              onclick={(e) => select(sample, offset + i, e.shiftKey)}
+              onpointerdown={(e) => beginDrag(e, sample)}
+              title={sample.path}
+            >
+              <span class="row-wave"
+                ><Waveform
+                  peaks={sample.peaks}
+                  active={playback.playing && playback.sample_id === sample.id}
+                /></span
+              ><span class="sample-name"
+                ><i class="dot" style:background={color}></i><span
+                  >{sample.name}</span
+                >{#if !sample.available}<small>OFFLINE</small>{/if}</span
+              >{#if showTags}<span class="row-tags"
+                  >{sample.tags.map((t) => '#' + t).join(' ') || '—'}</span
+                >{/if}{#if showRoot}<span
+                  >{sample.analysis?.key_root != null
+                    ? keys[sample.analysis.key_root]
+                    : '—'}</span
+                >{/if}<span
+                >{sample.analysis
+                  ? decimal(sample.analysis.duration_ms / 1000, 2) + ' s'
+                  : '—'}</span
+              ><span>{decimal(sample.analysis?.lufs)}</span>{#if showBpm}<span
+                  >{decimal(sample.analysis?.bpm)}</span
+                >{/if}
+            </button>{/each}
+        </div>
+        {#if !total && !loading}<div class="empty-state">
+            <Icon name={roots.length ? 'search' : 'folder'} size={32} />
+            <h2>
+              {roots.length ? 'No matching sounds' : 'A home for your sounds'}
+            </h2>
+            <p>
+              {roots.length
+                ? 'Try another name, tag, or source.'
+                : 'Add a sample folder to start exploring your library.'}
+            </p>
+            {#if !roots.length}<button
+                class="primary-button"
+                onclick={chooseSource}>Add source</button
+              >{:else}<button
+                class="outline-button"
+                onclick={() => {
+                  query = '';
+                  tagFilter = null;
+                  activeRoot = null;
+                  void load();
+                }}>Clear filters</button
+              >{/if}
+          </div>{/if}
+      </div>
+    {:else}<div class="map-pending">
+        <div class="map-symbol"><Icon name="grid" size={36} /></div>
+        <h2>Explore sounds by similarity</h2>
+        <p>
+          Audio maps are not available yet.<br />Your library is ready to browse
+          and audition in List view.
+        </p>
+        <button class="outline-button" onclick={() => (mode = 'list')}
+          >Browse library <Icon name="arrow" size={15} /></button
+        >
+      </div>{/if}
+    <div class="list-footer">
+      {#if selection.length > 1}<span>{selection.length} selected</span><button
+          onclick={openTag}>+ Tag selection</button
+        >{:else}<span><kbd>↑</kbd><kbd>↓</kbd> select & play</span><span
+          >Shift+click to range-select · Drag a row to your DAW</span
+        >{/if}
+    </div>
+    <div class="transport" class:empty={!selected}>
+      <div class="transport-info">
+        {#if selected}<div>
+            <button
+              class="play-control"
+              aria-label={playback.playing
+                ? 'Stop playback'
+                : 'Play selected sample'}
+              onclick={() => (playback.playing ? stop() : play())}
+              ><Icon
+                name={playback.playing && playback.sample_id === selected.id
+                  ? 'stop'
+                  : 'play'}
+                size={17}
+              /></button
+            ><span class="transport-name" title={selected.name}
+              >{selected.name}</span
+            >
+          </div>
+          <p>
+            {#if wave}Slice {(sliceStart / wave.sample_rate).toFixed(2)}–{(
+                sliceEnd / wave.sample_rate
+              ).toFixed(2)} / {(wave.frames / wave.sample_rate).toFixed(2)} s{:else}Loading
+              waveform…{/if}
+          </p>{:else}<div>
+            <Icon name="volume" /><span>Select a sample</span>
+          </div>
+          <p>Listen. Find your sound. Make something.</p>{/if}
+      </div>
+      <div
+        class="transport-wave"
+        bind:this={waveBox}
+        role="presentation"
+        onpointerdown={(e) => {
+          if (selected) beginDrag(e, selected);
+        }}
+      >
+        <Waveform peaks={wave?.peaks ?? []} large />
+        {#if wave && selected}<div
+            class="slice-region"
+            style:left={`${(sliceStart / wave.frames) * 100}%`}
+            style:width={`${((sliceEnd - sliceStart) / wave.frames) * 100}%`}
+          ></div>
+          <button
+            class="slice-handle start"
+            aria-label="Slice start"
+            title="← →: 10ms · Shift: 100ms · Alt: 1 frame, no snapping"
+            style:left={`${(sliceStart / wave.frames) * 100}%`}
+            onpointerdown={(e) => moveHandle(e, 'start')}
+            onkeydown={(e) => adjustHandle(e, 'start')}><span></span></button
+          ><button
+            class="slice-handle end"
+            aria-label="Slice end"
+            title="← →: 10ms · Shift: 100ms · Alt: 1 frame, no snapping"
+            style:left={`${(sliceEnd / wave.frames) * 100}%`}
+            onpointerdown={(e) => moveHandle(e, 'end')}
+            onkeydown={(e) => adjustHandle(e, 'end')}><span></span></button
+          >{#if playback.playing && playback.sample_id === selected.id}<div
+              class="playhead"
+              style:left={`${progress * 100}%`}
+            ></div>{/if}{/if}
+      </div>
+      <button
+        class="drag-slice"
+        disabled={!wave || preparing}
+        class:ready={!!slicePath}
+        onpointerdown={(e) => {
+          if (selected && slicePath) beginDrag(e, selected, true);
+        }}
+        onclick={() => {
+          if (!slicePath) void prepareSlice();
+        }}
+        ><Icon name="drag" size={18} /><span
+          >{preparing
+            ? 'Preparing…'
+            : slicePath
+              ? 'Drag slice'
+              : 'Prepare slice'}</span
+        ><small>Waveform: whole file</small></button
+      >
+    </div>
+  </main>
+
+  <aside class="inspector" aria-label="Sample details">
+    {#if selected}<div class="inspector-kind">
+        <i class="dot" style:background={selectedKind?.color}></i><span
+          >{selectedKind?.name.toUpperCase()}</span
+        >{#if playback.playing && playback.sample_id === selected.id}<span
+            class="playing-badge">Playing</span
+          >{/if}
+      </div>
+      <h1>{selected.name}</h1>
+      <p class="file-path">{selected.path}</p>
+      <div class="metadata-grid">
+        <div>
+          <div class="field-label">Length</div>
+          <span
+            >{selected.analysis
+              ? decimal(selected.analysis.duration_ms / 1000, 2) + ' s'
+              : '—'}</span
+          >
+        </div>
+        <div>
+          <label for="root-key">Root</label><select
+            id="root-key"
+            bind:value={metaKey}
+            onchange={saveMetadata}
+            disabled={!selected.analysis}
+            title={selected.analysis?.key_source ?? 'Not analyzed'}
+            ><option value="">—</option>{#each keys as key, i}<option
+                value={String(i)}>{key}</option
+              >{/each}</select
+          >
+        </div>
+        <div>
+          <label for="bpm">BPM</label><input
+            id="bpm"
+            type="text"
+            inputmode="decimal"
+            bind:value={metaBpm}
+            placeholder="—"
+            onblur={saveMetadata}
+            onkeydown={(e) => {
+              if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+            }}
+            disabled={!selected.analysis}
+            title={selected.analysis?.bpm_source ??
+              (selected.analysis ? 'No BPM detected' : 'Not analyzed')}
+          />
+        </div>
+        <div>
+          <div class="field-label">Loudness</div>
+          <span>{decimal(selected.analysis?.lufs)} <small>LUFS</small></span>
+        </div>
+        <div>
+          <div class="field-label">Peak</div>
+          <span>{decimal(selected.analysis?.peak_dbfs)} <small>dB</small></span>
+        </div>
+        <div>
+          <div class="field-label">Format</div>
+          <span
+            >{wave
+              ? `${(wave.sample_rate / 1000).toFixed(wave.sample_rate % 1000 ? 1 : 0)}k · ${wave.bits_per_sample ?? '—'}`
+              : selected.analysis
+                ? `${selected.analysis.sample_rate / 1000}k`
+                : '—'}</span
+          >
+        </div>
+      </div>
+      <div class="mode-editor">
+        <label for="key-mode">Key mode</label><select
+          id="key-mode"
+          bind:value={metaMode}
+          onchange={saveMetadata}
+          disabled={!selected.analysis || metaKey === ''}
+          ><option value="">Root only</option><option value="major"
+            >Major</option
+          ><option value="minor">Minor</option></select
+        >
+      </div>
+      <section class="inspector-tags">
+        <h2>Tags</h2>
+        <div class="tag-chips">
+          {#each selected.tags as tag}<button
+              class="tag-chip"
+              title={`Remove #${tag}`}
+              onclick={() => removeTag(tag)}>#{tag}<span>×</span></button
+            >{/each}<button class="add-tag" onclick={openTag}>+ Tag</button>
+        </div>
+      </section>
+      <section class="similar">
+        <h2>Similar</h2>
+        <div class="similar-empty">
+          <span class="similar-ring"></span>
+          <p>
+            Find more sounds like this.<br /><span
+              >Similarity search is not available yet.</span
+            >
+          </p>
+        </div>
+      </section>
+      <div class="inspector-bottom">
+        <Icon name="check" size={14} /><span>Original file stays untouched</span
+        >
+      </div>
+    {:else}<div class="inspector-placeholder">
+        <Icon name="volume" size={26} />
+        <h2>Every sound, a little closer.</h2>
+        <p>
+          Select a sample to inspect its details, edit tags, and choose a slice.
+        </p>
+        <div><kbd>Space</kbd> to play · <kbd>Esc</kbd> to clear</div>
+      </div>{/if}
+  </aside>
+  {#if error}<div class="error-toast" role="alert">
+      <span>{error}</span><button
+        aria-label="Dismiss message"
+        onclick={() => (error = '')}><Icon name="close" size={16} /></button
+      >
+    </div>{/if}
+</div>
+
+<dialog bind:this={dialog} onclose={() => {}}>
+  <div class="dialog-heading">
+    <h2>
+      {dialogMode === 'tag'
+        ? 'Tag selection'
+        : dialogMode === 'source'
+          ? 'Add sample source'
+          : 'Audition settings'}
+    </h2>
+    <button
+      class="icon-button"
+      onclick={() => dialog.close()}
+      aria-label="Close dialog"><Icon name="close" /></button
+    >
+  </div>
+  {#if dialogMode === 'tag'}<form
+      onsubmit={(e) => {
+        e.preventDefault();
+        void saveTag();
+      }}
+    >
+      <p>
+        Add a tag to {selection.length} selected {selection.length === 1
+          ? 'sample'
+          : 'samples'}. Use / for a hierarchy.
+      </p>
+      <label for="tag-name">Tag name</label><input
+        id="tag-name"
+        bind:value={tagName}
+        placeholder="Drums/kick"
+        required
+      /><button class="primary-button" type="submit">Add tag</button>
+    </form>
+  {:else if dialogMode === 'source'}<form
+      onsubmit={(e) => {
+        e.preventDefault();
+        void addSource();
+      }}
+    >
+      <p class="source-path">{sourcePath}</p>
+      <label for="source-label">Source name</label><input
+        id="source-label"
+        bind:value={sourceLabel}
+        required
+      /><label for="storage">Storage</label><select
+        id="storage"
+        bind:value={storage}
+        ><option value="local">Local drive</option><option value="external"
+          >External drive</option
+        ><option value="network">Network storage</option></select
+      ><button class="primary-button" type="submit">Add & scan</button>
+    </form>
+  {:else}<form
+      onsubmit={(e) => {
+        e.preventDefault();
+        saveSettings();
+      }}
+    >
+      <p>Match preview loudness while keeping peak headroom.</p>
+      <label for="target-lufs">Target loudness (LUFS)</label><input
+        id="target-lufs"
+        type="number"
+        min="-36"
+        max="-6"
+        step="1"
+        bind:value={targetLufs}
+        required
+      /><label class="checkbox-label"
+        ><input type="checkbox" bind:checked={matchLufs} />Match LUFS when
+        auditioning</label
+      ><button class="primary-button" type="submit">Save settings</button>
+    </form>{/if}
+</dialog>

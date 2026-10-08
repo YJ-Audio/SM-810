@@ -94,6 +94,26 @@ pub fn decode_head(path: &Path, seconds: Option<f64>) -> Result<Audio, Error> {
 	if seconds.is_some_and(|s| !s.is_finite() || s <= 0.0) {
 		return Err(Error::Invalid("preview duration must be positive".into()));
 	}
+	let mut result: Option<Audio> = None;
+	packets(path, |mut packet| {
+		let audio = result.get_or_insert_with(|| Audio {
+			samples: Vec::new(),
+			..packet.clone()
+		});
+		if let Some(seconds) = seconds {
+			let limit = (seconds * packet.sample_rate as f64) as usize * packet.channels;
+			packet.samples.truncate(limit.saturating_sub(audio.samples.len()));
+		}
+		if audio.samples.len().saturating_add(packet.samples.len()) > 128 * 1024 * 1024 {
+			return Err(Error::Invalid("decoded audio exceeds 512 MiB limit".into()));
+		}
+		audio.samples.extend_from_slice(&packet.samples);
+		Ok(seconds.is_none_or(|seconds| audio.duration() < seconds))
+	})?;
+	result.ok_or_else(|| Error::Invalid("empty signal".into()))
+}
+
+fn packets(path: &Path, mut visit: impl FnMut(Audio) -> Result<bool, Error>) -> Result<(), Error> {
 	let file = File::open(path)?;
 	let mut hint = Hint::new();
 	if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
@@ -113,7 +133,7 @@ pub fn decode_head(path: &Path, seconds: Option<f64>) -> Result<Audio, Error> {
 		.as_ref()
 		.and_then(|p| p.audio())
 		.ok_or_else(|| Error::Invalid("missing audio parameters".into()))?;
-	let mut result = Audio {
+	let mut metadata = Audio {
 		samples: Vec::new(),
 		sample_rate: params.sample_rate.unwrap_or(0),
 		channels: params.channels.as_ref().map(|c| c.count()).unwrap_or(0),
@@ -124,6 +144,8 @@ pub fn decode_head(path: &Path, seconds: Option<f64>) -> Result<Audio, Error> {
 	let mut options = AudioDecoderOptions::default();
 	options.gapless = true;
 	let mut decoder = symphonia::default::get_codecs().make_audio_decoder(params, &options)?;
+
+	let mut seen = false;
 	while let Some(packet) = format.next_packet()? {
 		if packet.track_id != id {
 			continue;
@@ -131,34 +153,152 @@ pub fn decode_head(path: &Path, seconds: Option<f64>) -> Result<Audio, Error> {
 		let buffer = decoder.decode(&packet)?;
 		let channels = buffer.spec().channels().count();
 		let rate = buffer.spec().rate();
-		if !result.samples.is_empty() && (channels != result.channels || rate != result.sample_rate) {
+		if seen && (channels != metadata.channels || rate != metadata.sample_rate) {
 			return Err(Error::Invalid("mid-stream format change".into()));
 		}
-		result.channels = channels;
-		result.sample_rate = rate;
 		if channels == 0 || rate == 0 {
 			return Err(Error::Invalid("zero sample rate or channels".into()));
 		}
-		let old = result.samples.len();
-		let count = buffer.samples_interleaved();
-		// A malformed container must not exhaust memory in every analysis worker.
-		if old.saturating_add(count) > 128 * 1024 * 1024 {
-			return Err(Error::Invalid("decoded audio exceeds 512 MiB limit".into()));
+		metadata.channels = channels;
+		metadata.sample_rate = rate;
+		let mut samples = vec![0.0f32; buffer.samples_interleaved()];
+		buffer.copy_to_slice_interleaved(&mut samples);
+		if samples.iter().any(|s| !s.is_finite()) {
+			return Err(Error::Invalid("non-finite signal".into()));
 		}
-		result.samples.resize(old + count, 0.0);
-		buffer.copy_to_slice_interleaved(&mut result.samples[old..]);
-		if let Some(seconds) = seconds {
-			let limit = (seconds * rate as f64) as usize * channels;
-			if result.samples.len() >= limit {
-				result.samples.truncate(limit);
+		if samples.is_empty() {
+			continue;
+		}
+		seen = true;
+		if !visit(Audio {
+			samples,
+			..metadata.clone()
+		})? {
+			return Ok(());
+		}
+	}
+	if seen {
+		Ok(())
+	} else {
+		Err(Error::Invalid("empty signal".into()))
+	}
+}
+
+/// Visits native-rate or resampled blocks without retaining the full file. Returning false cancels decoding.
+pub fn stream(path: &Path, rate: u32, semitones: i8, mut emit: impl FnMut(Audio) -> bool) -> Result<(), Error> {
+	if rate == 0 || !(-24..=24).contains(&semitones) {
+		return Err(Error::Invalid("invalid playback rate".into()));
+	}
+	let mut converter: Option<BlockResampler> = None;
+	let mut cancelled = false;
+	packets(path, |mut packet| {
+		packet.sample_rate = (packet.sample_rate as f64 * 2.0f64.powf(semitones as f64 / 12.0)).round() as u32;
+		if packet.sample_rate == rate {
+			cancelled = !emit(packet);
+		} else {
+			if converter.is_none() {
+				converter = Some(BlockResampler::new(&packet, rate)?);
+			}
+			cancelled = !converter.as_mut().unwrap().push(&packet.samples, &mut emit)?;
+		}
+		Ok(!cancelled)
+	})?;
+	if !cancelled && let Some(mut converter) = converter {
+		converter.finish(&mut emit)?;
+	}
+	Ok(())
+}
+
+struct BlockResampler {
+	filter: Fft<f32>,
+	metadata: Audio,
+	pending: Vec<f32>,
+	input_frames: usize,
+	output_frames: usize,
+	trim: usize,
+	ratio: f64,
+}
+impl BlockResampler {
+	fn new(audio: &Audio, rate: u32) -> Result<Self, Error> {
+		let filter = Fft::<f32>::new(
+			audio.sample_rate as usize,
+			rate as usize,
+			1024,
+			audio.channels,
+			FixedSync::Both,
+		)
+		.map_err(|e| Error::Resample(e.to_string()))?;
+		Ok(Self {
+			trim: filter.output_delay(),
+			filter,
+			metadata: Audio {
+				samples: Vec::new(),
+				sample_rate: rate,
+				container_frames: None,
+				..audio.clone()
+			},
+			pending: Vec::new(),
+			input_frames: 0,
+			output_frames: 0,
+			ratio: rate as f64 / audio.sample_rate as f64,
+		})
+	}
+	fn push(&mut self, samples: &[f32], emit: &mut impl FnMut(Audio) -> bool) -> Result<bool, Error> {
+		self.input_frames += samples.len() / self.metadata.channels;
+		self.pending.extend_from_slice(samples);
+		while self.pending.len() / self.metadata.channels >= self.filter.input_frames_next() {
+			if !self.block(false, emit)? {
+				return Ok(false);
+			}
+		}
+		Ok(true)
+	}
+	fn block(&mut self, last: bool, emit: &mut impl FnMut(Audio) -> bool) -> Result<bool, Error> {
+		let channels = self.metadata.channels;
+		let available = (self.pending.len() / channels).min(self.filter.input_frames_next());
+		let input =
+			InterleavedSlice::new(&self.pending, channels, available).map_err(|e| Error::Resample(e.to_string()))?;
+		let capacity = self.filter.output_frames_max();
+		let mut samples = vec![0.0; capacity * channels];
+		let mut output =
+			InterleavedSlice::new_mut(&mut samples, channels, capacity).map_err(|e| Error::Resample(e.to_string()))?;
+		let indexing = rubato::Indexing {
+			partial_len: Some(available),
+			..Default::default()
+		};
+		let (_, produced) = self
+			.filter
+			.process_into_buffer(&input, &mut output, Some(&indexing))
+			.map_err(|e| Error::Resample(e.to_string()))?;
+		self.pending.drain(..available * channels);
+		let skip = self.trim.min(produced);
+		self.trim -= skip;
+		let expected = (self.input_frames as f64 * self.ratio).ceil() as usize;
+		let frames = if last {
+			(produced - skip).min(expected.saturating_sub(self.output_frames))
+		} else {
+			produced - skip
+		};
+		if frames == 0 {
+			return Ok(true);
+		}
+		self.output_frames += frames;
+		samples.copy_within(skip * channels..(skip + frames) * channels, 0);
+		samples.truncate(frames * channels);
+		Ok(emit(Audio {
+			samples,
+			..self.metadata.clone()
+		}))
+	}
+	fn finish(&mut self, emit: &mut impl FnMut(Audio) -> bool) -> Result<(), Error> {
+		let expected = (self.input_frames as f64 * self.ratio).ceil() as usize;
+		while self.output_frames < expected {
+			if !self.block(true, emit)? {
 				break;
 			}
 		}
+		Ok(())
 	}
-	if result.samples.is_empty() || result.samples.iter().any(|s| !s.is_finite()) {
-		return Err(Error::Invalid("empty or non-finite signal".into()));
-	}
-	Ok(result)
 }
 
 #[cfg(test)]
@@ -191,5 +331,50 @@ mod tests {
 		let mono = audio.mono_at(16000).unwrap();
 		assert_eq!(mono.len(), 16000);
 		assert!(mono.iter().map(|s| s * s).sum::<f32>() / 16000.0 > 0.1);
+	}
+	#[test]
+	fn streamed_resampling_matches_whole_file_and_can_cancel_after_first_block() {
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("stream.wav");
+		let mut file = hound::WavWriter::create(
+			&path,
+			hound::WavSpec {
+				channels: 2,
+				sample_rate: 44100,
+				bits_per_sample: 32,
+				sample_format: hound::SampleFormat::Float,
+			},
+		)
+		.unwrap();
+		for i in 0..103237 {
+			file.write_sample((i as f32 * 0.07).sin() * 0.4).unwrap();
+			file.write_sample((i as f32 * 0.09).cos() * 0.2).unwrap();
+		}
+		file.finalize().unwrap();
+		for (rate, pitch) in [(44100, 0), (48000, 0), (16000, 0), (48000, 7), (48000, -12)] {
+			let mut original = decode(&path).unwrap();
+			original.sample_rate = (original.sample_rate as f64 * 2.0f64.powf(pitch as f64 / 12.0)).round() as u32;
+			let expected = original.resample(rate).unwrap();
+			let mut output = Vec::new();
+			let mut blocks = 0;
+			stream(&path, rate, pitch, |audio| {
+				blocks += 1;
+				assert_eq!(audio.sample_rate, rate);
+				output.extend(audio.samples);
+				true
+			})
+			.unwrap();
+			assert!(blocks > 1);
+			assert_eq!(output.len(), expected.samples.len());
+			assert!(output.iter().zip(&expected.samples).all(|(a, b)| (a - b).abs() < 1e-5));
+		}
+		let mut calls = 0;
+		stream(&path, 48000, 0, |block| {
+			calls += 1;
+			assert!(block.frames() < 10000);
+			false
+		})
+		.unwrap();
+		assert_eq!(calls, 1);
 	}
 }

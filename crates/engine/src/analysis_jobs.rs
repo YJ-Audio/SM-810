@@ -93,7 +93,9 @@ impl Engine {
         })
 	}
 	pub fn peaks(&self, id: i64) -> Result<Vec<i8>> {
-		let db = self.reader()?;
+		self.peaks_with_reader(&self.reader()?, id)
+	}
+	pub(crate) fn peaks_with_reader(&self, db: &db::Connection, id: i64) -> Result<Vec<i8>> {
 		use sampler_db::OptionalExtension;
 		let location: Option<(u64, usize)> = db
 			.query_row(

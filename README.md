@@ -2,17 +2,50 @@
 
 DTM 用サンプルマネージャー。仕様は [SPEC.md](SPEC.md)、現在の実装状況と計測値は [PROGRESS.md](PROGRESS.md)、設計判断は [DECISIONS.md](DECISIONS.md) を参照してください。
 
-現在は読み取り専用ライブラリ走査・検索、音声デコード・解析、永続波形キャッシュ、再開可能なジョブ処理を実装しています。UI は後続マイルストーンです。
+現在は Tauri 2 + Svelte 5 のデスクトップ版 List UI を起動できます。提供画像を基準に、ダーク配色のソース／タグ、仮想リスト、インスペクタ、波形トランスポートを実装しています。表示・検索・試聴には SQLite 内の実データを使います。
+
+Map、CLAP 類似／自然文検索、コレクション、タグルール、Ableton Link は未実装です。仕様の段階順に進めており、マイルストーン3は実機受け入れ検証が残っています。
+
+## デスクトップの起動
+
+Node.js 22.12 以上、npm 11、Rust（固定ツールチェーン）、各 OS の Tauri 開発環境が必要です。
+
+```sh
+npx --yes npm@11 --prefix ui ci
+npm --prefix ui run tauri -- dev
+```
+
+macOS のアプリバンドルを作成する場合:
+
+```sh
+npm --prefix ui run tauri -- build --debug --bundles app
+```
+
+生成先は `target/debug/bundle/macos/Sampler.app` です。開発用ビルドで、配布用の署名・公証は行っていません。Windows の実行ファイルは同じプロジェクトを Windows 上で `npm --prefix ui run tauri -- build --debug --no-bundle` により生成します。
+
+- Sources の「+」でフォルダを追加し、Analyze で解析します。既存の CLI データベースもそのまま開きます。
+- 名前の部分一致、`#tag`、ソース／子孫タグを絞り込みに使えます。
+- クリックまたは ↑↓ で試聴、Space で再生／停止、Escape で選択解除、Cmd/Ctrl+K で検索に移動します。
+- Shift+クリックで範囲選択し、Tag selection でまとめてタグを付けられます。解析済みの BPM／キーはインスペクタで修正できます。
+- Match LUFS、目標 LUFS、±24 半音の移調に対応します。波形は元ファイルの時間軸を表示します。
+- 行または下部波形のドラッグで元ファイルを渡します。両端ハンドルで範囲を調整し、Drag slice から永続 WAV を渡します。初期の全範囲は Prepare slice を押すと書き出せます。
+- オーディオデバイス切断時はエラーを表示します。再接続後はアプリを再起動してください。
+
+デスクトップの DB を分けるには起動環境の `SAMPLER_DB` に絶対パスを設定します。ブラウザだけで UI を開いてもローカルライブラリへの接続や試聴は行えません。
 
 ## 開発
 
 Rust のバージョンは `rust-toolchain.toml` で固定しています。
 
 ```sh
+npm --prefix ui run build
 cargo build --release
 cargo test --workspace
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
+npm --prefix ui run check
+npm --prefix ui run test
+cargo bench -p sampler-audio --bench mixer
 ```
 
 ## CLI
@@ -41,4 +74,4 @@ cargo run --release -- watch 1
 - ドライブのマウント先が変わった場合は `relocate-root <id> <new-path>` の後に `scan <id>` を実行します。
 - `verify` は全体ハッシュを読み、簡易ハッシュ衝突を分割します。初回スキャンでは全体を読まないため別コマンドです。
 - `watch` は変更をまとめて再走査し、NAS と再接続のために定期走査も行います。Ctrl+C で終了します。
-- 同一 DB に対する変更は1つの CLI プロセスから実行してください。
+- 同一 DB は OS のファイルロックで排他制御します。CLI を実行する前にデスクトップを終了してください。強制終了してもロックは OS により解放されます。

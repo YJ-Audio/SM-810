@@ -223,7 +223,37 @@ pub struct Sample {
 	pub size: u64,
 }
 
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct BrowseQuery {
+	#[serde(default)]
+	pub text: String,
+	pub root_id: Option<i64>,
+	pub tag: Option<String>,
+	#[serde(default)]
+	pub offset: usize,
+	pub limit: Option<usize>,
+}
+#[derive(Debug, Serialize)]
+pub struct Page {
+	pub items: Vec<Sample>,
+	pub total: usize,
+}
 pub fn search(db: &Connection, text: &str, limit: usize, offset: usize) -> Result<Vec<Sample>> {
+	Ok(browse(
+		db,
+		&BrowseQuery {
+			text: text.into(),
+			offset,
+			limit: Some(limit),
+			..Default::default()
+		},
+	)?
+	.items)
+}
+pub fn browse(db: &Connection, request: &BrowseQuery) -> Result<Page> {
+	let text = &request.text;
+	let limit = request.limit.unwrap_or(100);
+	let offset = request.offset;
 	let quoted = format!("\"{}\"", text.replace('"', "\"\""));
 	let pattern = format!(
 		"%{}%",
@@ -242,11 +272,21 @@ pub fn search(db: &Connection, text: &str, limit: usize, offset: usize) -> Resul
 			pattern,
 		)
 	};
+	let filter = format!(
+		"({filter}) AND (?4 IS NULL OR f.root_id=?4) AND (?5 IS NULL OR s.id IN (WITH RECURSIVE tag_paths(id,path) AS (SELECT id,name FROM tags WHERE parent_id IS NULL UNION ALL SELECT t.id,p.path || '/' || t.name FROM tags t JOIN tag_paths p ON t.parent_id=p.id), descendants(id) AS (SELECT id FROM tags WHERE name=?5 COLLATE NOCASE OR id IN (SELECT id FROM tag_paths WHERE path=?5 COLLATE NOCASE) UNION ALL SELECT tags.id FROM tags JOIN descendants ON tags.parent_id=descendants.id) SELECT st.sample_id FROM sample_tags st JOIN descendants d ON d.id=st.tag_id))"
+	);
+	let total:usize=db.query_row(&format!("SELECT COUNT(DISTINCT s.id) FROM samples s JOIN files f ON f.sample_id=s.id WHERE {filter} AND ?2 IS NULL AND ?3 IS NULL"),params![query,Option::<i64>::None,Option::<i64>::None,request.root_id,request.tag],|row|Ok(row.get::<_,i64>(0)? as usize))?;
 	let sql = format!(
 		"WITH ranked AS (SELECT s.id,s.size,f.rel_path,r.path,r.id AS root_id,(r.enabled AND rs.status!='offline' AND f.last_seen_scan>=rs.complete_generation) AS available,ROW_NUMBER() OVER (PARTITION BY s.id ORDER BY (r.enabled AND rs.status!='offline' AND f.last_seen_scan>=rs.complete_generation) DESC,f.id) AS rank FROM samples s JOIN files f ON f.sample_id=s.id JOIN roots r ON r.id=f.root_id JOIN root_state rs ON rs.root_id=r.id WHERE {filter}) SELECT id,size,rel_path,path,root_id,available FROM ranked WHERE rank=1 ORDER BY rel_path COLLATE NOCASE,id LIMIT ?2 OFFSET ?3"
 	);
 	let mut stmt = db.prepare(&sql)?;
-	let mut rows = stmt.query(params![query, limit.min(100000) as i64, offset as i64])?;
+	let mut rows = stmt.query(params![
+		query,
+		limit.min(100000) as i64,
+		offset as i64,
+		request.root_id,
+		request.tag
+	])?;
 	let mut results = Vec::new();
 	while let Some(row) = rows.next()? {
 		let id = row.get(0)?;
@@ -272,7 +312,7 @@ pub fn search(db: &Connection, text: &str, limit: usize, offset: usize) -> Resul
 			tags,
 		});
 	}
-	Ok(results)
+	Ok(Page { items: results, total })
 }
 
 pub fn tag(db: &Transaction<'_>, sample: i64, name: &str) -> Result<()> {
@@ -518,4 +558,32 @@ pub fn finish_job(db: &Transaction<'_>, job: &Job, error: Option<&str>) -> Resul
 pub fn requeue_old_analysis(db: &Transaction<'_>, version: i64) -> Result<()> {
 	db.execute("UPDATE jobs SET state='pending',error=NULL WHERE kind='analyze' AND sample_id IN (SELECT sample_id FROM analysis WHERE analyzer_ver<?1)",[version])?;
 	Ok(())
+}
+
+#[derive(Debug, Serialize)]
+pub struct TagSummary {
+	pub id: i64,
+	pub parent_id: Option<i64>,
+	pub name: String,
+	pub count: i64,
+}
+pub fn tags(db: &Connection) -> Result<Vec<TagSummary>> {
+	let mut stmt=db.prepare("SELECT t.id,t.parent_id,t.name,COUNT(st.sample_id) FROM tags t LEFT JOIN sample_tags st ON st.tag_id=t.id GROUP BY t.id ORDER BY t.name COLLATE NOCASE")?;
+	Ok(stmt
+		.query_map([], |r| {
+			Ok(TagSummary {
+				id: r.get(0)?,
+				parent_id: r.get(1)?,
+				name: r.get(2)?,
+				count: r.get(3)?,
+			})
+		})?
+		.collect::<std::result::Result<_, _>>()?)
+}
+pub fn remove_tag(db: &Transaction<'_>, id: i64, name: &str) -> Result<()> {
+	db.execute(
+		"DELETE FROM sample_tags WHERE sample_id=?1 AND tag_id IN (SELECT id FROM tags WHERE name=?2)",
+		params![id, name],
+	)?;
+	rebuild_search(db, id)
 }

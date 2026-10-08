@@ -6,6 +6,9 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+sampler-audio.workspace = true
+hound = "3.5.1"
+tempfile.workspace = true
 sampler-decode.workspace = true
 sampler-analysis.workspace = true
 serde_json.workspace = true
@@ -13,7 +16,3 @@ sampler-db.workspace = true
 sampler-scan.workspace = true
 thiserror.workspace = true
 serde.workspace = true
-
-[dev-dependencies]
-hound = "3.5.1"
-tempfile.workspace = true

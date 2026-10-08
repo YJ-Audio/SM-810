@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main",
+  "description": "Library window: choose source folders and drag audio copies to a DAW.",
+  "windows": ["main"],
+  "permissions": ["core:default", "dialog:allow-open", "drag:allow-start-drag"]
+}
