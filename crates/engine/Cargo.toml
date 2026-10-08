@@ -19,3 +19,4 @@ sampler-db.workspace = true
 sampler-scan.workspace = true
 thiserror.workspace = true
 serde.workspace = true
+regex = "1.13.1"

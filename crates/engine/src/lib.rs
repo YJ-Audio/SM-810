@@ -56,6 +56,7 @@ pub struct Engine {
 	model: Mutex<Option<sampler_embed::Model>>,
 	embedding_lock: Mutex<()>,
 	map_lock: Mutex<()>,
+	organize_lock: Mutex<()>,
 	_process_lock: File,
 	path: PathBuf,
 	sender: Option<SyncSender<Request>>,
@@ -125,6 +126,7 @@ impl Engine {
 			model: Mutex::new(None),
 			embedding_lock: Mutex::new(()),
 			map_lock: Mutex::new(()),
+			organize_lock: Mutex::new(()),
 			_process_lock: process_lock,
 			path,
 			sender: Some(sender),
@@ -261,6 +263,7 @@ impl Engine {
 		let status = if report.errors.is_empty() { "online" } else { "partial" };
 		let message = (!report.errors.is_empty()).then(|| report.errors.join("\n"));
 		self.write(move |tx| db::finish_scan(tx, id, generation, status, message.as_deref()))?;
+		self.apply_rules()?;
 		Ok(ScanReport {
 			root_id: id,
 			files: report.files,
@@ -359,6 +362,7 @@ impl Engine {
 		Ok(scan::Watch::new(&root.path)?)
 	}
 }
+pub mod organize;
 
 impl Drop for Engine {
 	fn drop(&mut self) {

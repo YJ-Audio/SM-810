@@ -12,6 +12,7 @@ pub enum Query {
 	Tag { name: String },
 	Text { text: String },
 	Root { id: i64 },
+	Collection { id: i64 },
 	Field { field: Field, op: Comparison, value: f64 },
 	SimilarTo { id: i64, count: usize },
 	Semantic { text: String, count: usize },
@@ -70,6 +71,13 @@ impl Engine {
 			Query::Not { condition } => {
 				let excluded = self.resolve_query(condition, universe, depth + 1)?;
 				return Ok(universe.difference(&excluded).copied().collect());
+			}
+			Query::Collection { id } => {
+				if let Some(query) = self.collection_query(*id)? {
+					return self.resolve_query(&query, universe, depth + 1);
+				}
+				let ids = self.collection_ids(*id)?;
+				return Ok(ids.intersection(universe).copied().collect());
 			}
 			Query::Field { field, op, value } => {
 				if !value.is_finite() {

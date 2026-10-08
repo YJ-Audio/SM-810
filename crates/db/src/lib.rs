@@ -225,6 +225,7 @@ pub struct Sample {
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct BrowseQuery {
+	pub collection_id: Option<i64>,
 	pub map_id: Option<i64>,
 	pub ids: Option<Vec<i64>>,
 	pub similar_to: Option<i64>,
@@ -309,7 +310,7 @@ pub fn browse(db: &Connection, request: &BrowseQuery) -> Result<Page> {
 	let offset = request.offset;
 	let total:usize=db.query_row(&format!("SELECT COUNT(DISTINCT s.id) FROM samples s JOIN files f ON f.sample_id=s.id WHERE {filter} AND ?2 IS NULL AND ?3 IS NULL"),params![query,Option::<i64>::None,Option::<i64>::None,request.root_id,request.tag,ids_json(request)],|row|Ok(row.get::<_,i64>(0)? as usize))?;
 	let sql = format!(
-		"WITH ranked AS (SELECT s.id,s.size,f.rel_path,r.path,r.id AS root_id,(r.enabled AND rs.status!='offline' AND f.last_seen_scan>=rs.complete_generation) AS available,ROW_NUMBER() OVER (PARTITION BY s.id ORDER BY (r.enabled AND rs.status!='offline' AND f.last_seen_scan>=rs.complete_generation) DESC,f.id) AS rank FROM samples s JOIN files f ON f.sample_id=s.id JOIN roots r ON r.id=f.root_id JOIN root_state rs ON rs.root_id=r.id WHERE {filter}) SELECT id,size,rel_path,path,root_id,available FROM ranked WHERE rank=1 ORDER BY rel_path COLLATE NOCASE,id LIMIT ?2 OFFSET ?3"
+		"WITH ranked AS (SELECT s.id,s.size,f.rel_path,r.path,r.id AS root_id,(r.enabled AND rs.status!='offline' AND f.last_seen_scan>=rs.complete_generation) AS available,ROW_NUMBER() OVER (PARTITION BY s.id ORDER BY (r.enabled AND rs.status!='offline' AND f.last_seen_scan>=rs.complete_generation) DESC,f.id) AS rank FROM samples s JOIN files f ON f.sample_id=s.id JOIN roots r ON r.id=f.root_id JOIN root_state rs ON rs.root_id=r.id WHERE {filter}) SELECT id,size,rel_path,path,root_id,available FROM ranked WHERE rank=1 ORDER BY (SELECT ci.position FROM collection_items ci WHERE ci.collection_id=?7 AND ci.sample_id=ranked.id),rel_path COLLATE NOCASE,id LIMIT ?2 OFFSET ?3"
 	);
 	let mut stmt = db.prepare(&sql)?;
 	let mut rows = stmt.query(params![
@@ -318,7 +319,8 @@ pub fn browse(db: &Connection, request: &BrowseQuery) -> Result<Page> {
 		offset as i64,
 		request.root_id,
 		request.tag,
-		ids_json(request)
+		ids_json(request),
+		request.collection_id
 	])?;
 	let mut results = Vec::new();
 	while let Some(row) = rows.next()? {
@@ -348,7 +350,7 @@ pub fn browse(db: &Connection, request: &BrowseQuery) -> Result<Page> {
 	Ok(Page { items: results, total })
 }
 
-pub fn tag(db: &Transaction<'_>, sample: i64, name: &str) -> Result<()> {
+pub fn ensure_tag(db: &Transaction<'_>, name: &str) -> Result<i64> {
 	let mut parent: Option<i64> = None;
 	for component in name.split('/') {
 		let component = component.trim();
@@ -365,7 +367,11 @@ pub fn tag(db: &Transaction<'_>, sample: i64, name: &str) -> Result<()> {
 			|r| r.get(0),
 		)?);
 	}
-	db.execute("INSERT INTO sample_tags(sample_id,tag_id,rule_id) VALUES(?1,?2,NULL) ON CONFLICT(sample_id,tag_id) DO UPDATE SET rule_id=NULL",params![sample,parent])?;
+	parent.ok_or_else(|| Error::Invalid("empty tag path".into()))
+}
+pub fn tag(db: &Transaction<'_>, sample: i64, name: &str) -> Result<()> {
+	let tag = ensure_tag(db, name)?;
+	db.execute("INSERT INTO sample_tags(sample_id,tag_id,rule_id) VALUES(?1,?2,NULL) ON CONFLICT(sample_id,tag_id) DO UPDATE SET rule_id=NULL",params![sample,tag])?;
 	rebuild_search(db, sample)?;
 	Ok(())
 }

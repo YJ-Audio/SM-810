@@ -28,6 +28,7 @@ pub struct Waveform {
 impl Engine {
 	pub fn browse(&self, mut request: db::BrowseQuery) -> Result<Page> {
 		self.scope_map(&mut request)?;
+		self.scope_collection(&mut request)?;
 		if request.text.trim_start().starts_with('~') || request.similar_to.is_some() {
 			return self.semantic_browse(request);
 		}

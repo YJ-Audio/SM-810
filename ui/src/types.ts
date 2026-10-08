@@ -41,6 +41,8 @@ export type Tag = {
 };
 export type Job = { kind: string; state: string; count: number };
 export type Bootstrap = {
+  rules: Rule[];
+  collections: Collection[];
   maps: MapSummary[];
   layout_active: number;
   roots: Root[];
@@ -120,9 +122,39 @@ export function waveformPath(
 export type MapSummary = {
   id: number;
   name: string;
-  query: Record<string, unknown>;
+  query: Query;
   layout_rev: number;
   points: number;
   provisional: number;
   labels: { x: number; y: number; text: string }[];
+};
+
+export type Query =
+  | { type: 'all' | 'any'; conditions: Query[] }
+  | { type: 'not'; condition: Query }
+  | { type: 'tag'; name: string }
+  | { type: 'text'; text: string }
+  | { type: 'root' | 'collection'; id: number }
+  | {
+      type: 'field';
+      field: 'duration_ms' | 'bpm' | 'key_root' | 'lufs' | 'is_loop';
+      op: 'eq' | 'ne' | 'lt' | 'le' | 'gt' | 'ge';
+      value: number;
+    }
+  | { type: 'similar_to'; id: number; count: number }
+  | { type: 'semantic'; text: string; count: number };
+export type Rule = {
+  id: number | null;
+  tag: string;
+  target: 'filename' | 'rel_path';
+  pattern: string;
+  enabled: boolean;
+};
+export type Collection = {
+  id: number;
+  name: string;
+  kind: 'static' | 'smart';
+  query: Query | null;
+  count: number;
+  error: string | null;
 };

@@ -12,6 +12,7 @@
     arrow: 'm9 5 7 7-7 7',
     check: 'm5 12 4 4L19 6',
     refresh: 'M20 10a8 8 0 1 0 0 5 M20 4v6h-6',
+    filter: 'M4 5h16M7 11h10M10 17h4',
     collection: 'M5 4h14v16H5Z M8 8h8 M8 12h5',
     link: 'm10 13 4-4 M8 15l-1 1a4 4 0 0 1-6-6l4-4a4 4 0 0 1 6 0 M16 9l1-1a4 4 0 0 1 6 6l-4 4a4 4 0 0 1-6 0',
     volume: 'M3 9h4l5-5v16l-5-5H3Z M16 8a6 6 0 0 1 0 8 M19 5a10 10 0 0 1 0 14',

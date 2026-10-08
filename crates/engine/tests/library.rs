@@ -242,6 +242,7 @@ fn browsing_filters_hierarchy_and_root_before_paging() {
 	let snare = engine.search("snare", 1, 0).unwrap()[0].id;
 	engine.tag(snare, "Drums/One shots/snare").unwrap();
 	let request = sampler_db::BrowseQuery {
+		collection_id: None,
 		map_id: None,
 		ids: None,
 		similar_to: None,
@@ -563,4 +564,130 @@ fn maps_persist_positions_and_dim_filters_without_moving_points() {
 			.total,
 		9
 	);
+}
+
+#[test]
+fn rule_reapplication_preserves_manual_tags_and_overlapping_rules() {
+	use sampler_engine::organize::{Rule, RuleTarget};
+	let dir = tempfile::tempdir().unwrap();
+	let source = dir.path().join("sounds");
+	fs::create_dir(&source).unwrap();
+	fs::write(source.join("Kick_dark.wav"), b"kick").unwrap();
+	fs::write(source.join("Snare_bright.wav"), b"snare").unwrap();
+	let engine = Engine::open(dir.path().join("library.db")).unwrap();
+	let root = engine.add_root(&source, "Test", Storage::Local).unwrap();
+	engine.scan(root).unwrap();
+	let kick = engine.search("Kick_dark", 10, 0).unwrap()[0].id;
+	let snare = engine.search("Snare_bright", 10, 0).unwrap()[0].id;
+	let rule = Rule {
+		id: None,
+		tag: "Drums/hit".into(),
+		target: RuleTarget::Filename,
+		pattern: "(?i)kick".into(),
+		enabled: true,
+	};
+	engine.save_rule(rule.clone()).unwrap();
+	engine.save_rule(rule).unwrap();
+	engine.apply_rules().unwrap();
+	engine.tag(kick, "Mood/keep").unwrap();
+	engine.tag(snare, "Drums/hit").unwrap();
+	let mut rule = engine.rules().unwrap()[0].clone();
+	rule.pattern = "(?i)snare".into();
+	engine.save_rule(rule.clone()).unwrap();
+	engine.apply_rules().unwrap();
+	// The second rule still contributes the kick; the manual snare must stay manual.
+	assert!(
+		engine.search("Kick_dark", 10, 0).unwrap()[0]
+			.tags
+			.contains(&"hit".to_string())
+	);
+	let second = engine.rules().unwrap()[1].id.unwrap();
+	engine.delete_rule(second).unwrap();
+	let tags = &engine.search("Kick_dark", 10, 0).unwrap()[0].tags;
+	assert_eq!(tags, &["keep"]);
+	rule.enabled = false;
+	engine.save_rule(rule.clone()).unwrap();
+	engine.apply_rules().unwrap();
+	assert_eq!(engine.search("Snare_bright", 10, 0).unwrap()[0].tags, &["hit"]);
+	let provenance: Option<i64> = engine
+		.reader()
+		.unwrap()
+		.query_row("SELECT rule_id FROM sample_tags WHERE sample_id=?1", [snare], |r| {
+			r.get(0)
+		})
+		.unwrap();
+	assert_eq!(provenance, None);
+	rule.pattern = "[".into();
+	assert!(engine.save_rule(rule).is_err());
+	assert_eq!(engine.rules().unwrap().len(), 1);
+	assert!(engine.search("keep", 10, 0).unwrap().iter().any(|s| s.id == kick));
+	assert!(!engine.search("hit", 10, 0).unwrap().iter().any(|s| s.id == kick));
+}
+#[test]
+fn collections_share_queries_keep_manual_order_and_persist() {
+	use sampler_db::BrowseQuery;
+	use sampler_engine::query::Query;
+	let dir = tempfile::tempdir().unwrap();
+	let source = dir.path().join("sounds");
+	fs::create_dir(&source).unwrap();
+	for (name, bytes) in [("alpha.wav", b"alpha".as_slice()), ("zeta.wav", b"zeta".as_slice())] {
+		fs::write(source.join(name), bytes).unwrap();
+	}
+	let path = dir.path().join("library.db");
+	let engine = Engine::open(&path).unwrap();
+	let root = engine.add_root(&source, "Test", Storage::Local).unwrap();
+	engine.scan(root).unwrap();
+	let alpha = engine.search("alpha", 10, 0).unwrap()[0].id;
+	let zeta = engine.search("zeta", 10, 0).unwrap()[0].id;
+	let id = engine.save_collection(None, "Ideas".into(), None).unwrap();
+	engine
+		.edit_collection_items(id, vec![zeta, alpha, zeta], false)
+		.unwrap();
+	let request = || BrowseQuery {
+		collection_id: Some(id),
+		..Default::default()
+	};
+	assert_eq!(
+		engine
+			.browse(request())
+			.unwrap()
+			.items
+			.iter()
+			.map(|r| r.sample.id)
+			.collect::<Vec<_>>(),
+		[zeta, alpha]
+	);
+	engine.move_collection_item(id, alpha, true).unwrap();
+	assert_eq!(engine.browse(request()).unwrap().items[0].sample.id, alpha);
+	let smart = engine
+		.save_collection(
+			None,
+			"Tagged".into(),
+			Some(Query::Tag {
+				name: "Mood/bright".into(),
+			}),
+		)
+		.unwrap();
+	assert_eq!(engine.collection_ids(smart).unwrap().len(), 0);
+	engine.tag(alpha, "Mood/bright").unwrap();
+	assert_eq!(engine.collection_ids(smart).unwrap().len(), 1);
+	assert!(engine.edit_collection_items(smart, vec![zeta], false).is_err());
+	assert_eq!(engine.query_ids(&Query::Collection { id }).unwrap().len(), 2);
+	let dependent = engine
+		.save_collection(None, "Following".into(), Some(Query::Collection { id: smart }))
+		.unwrap();
+	assert!(
+		engine
+			.save_collection(Some(smart), "Cycle".into(), Some(Query::Collection { id: dependent }))
+			.is_err()
+	);
+	assert_eq!(engine.collection_ids(dependent).unwrap().len(), 1);
+	engine.delete_collection(dependent).unwrap();
+	drop(engine);
+	let engine = Engine::open(&path).unwrap();
+	assert_eq!(engine.collections().unwrap().len(), 2);
+	assert_eq!(engine.browse(request()).unwrap().items[0].sample.id, alpha);
+	engine.edit_collection_items(id, vec![alpha], true).unwrap();
+	assert_eq!(engine.browse(request()).unwrap().total, 1);
+	assert!(source.join("alpha.wav").exists());
 }

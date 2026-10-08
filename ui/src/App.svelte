@@ -7,6 +7,8 @@
   import Icon from './Icon.svelte';
   import Waveform from './Waveform.svelte';
   import MapCanvas from './MapCanvas.svelte';
+  import Organization from './Organization.svelte';
+  let organizer = $state<ReturnType<typeof Organization>>();
   let mapCanvas = $state<ReturnType<typeof MapCanvas>>();
   import { keys, kind, parseSearch } from './types';
   import type {
@@ -19,8 +21,17 @@
     Wave,
     Playback,
     MapSummary,
+    Query,
+    Rule,
+    Collection,
   } from './types';
 
+  let collections = $state<Collection[]>([]),
+    rules = $state<Rule[]>([]),
+    activeCollection = $state<number | null>(null);
+  let currentCollection = $derived(
+    collections.find((c) => c.id === activeCollection),
+  );
   let maps = $state<MapSummary[]>([]),
     activeMap = $state<number | null>(null),
     mapInfo = $state<MapSummary | null>(null),
@@ -150,6 +161,7 @@
     tag: activeTag,
     root_id: activeRoot,
     map_id: activeMap,
+    collection_id: activeCollection,
     similar_to: sortBySimilarity && !parsed.semantic ? similarityAnchor : null,
     offset: start,
     limit,
@@ -158,6 +170,8 @@
   async function refreshStatus() {
     const data = await invoke<Bootstrap>('bootstrap');
     maps = data.maps;
+    collections = data.collections;
+    rules = data.rules;
     layoutActive = data.layout_active;
     roots = data.roots;
     tags = data.tags;
@@ -282,8 +296,10 @@
   function mapSelection(ids: number[]) {
     selection = ids;
   }
-  function currentMapQuery(): Record<string, unknown> {
-    const conditions: Record<string, unknown>[] = [];
+  function currentMapQuery(): Query {
+    const conditions: Query[] = [];
+    if (activeCollection)
+      conditions.push({ type: 'collection', id: activeCollection });
     if (activeMap) {
       const query = maps.find((m) => m.id === activeMap)?.query;
       if (query) conditions.push(query);
@@ -430,6 +446,7 @@
       reorder &&
       !range &&
       sortBySimilarity &&
+      currentCollection?.kind !== 'static' &&
       embedded > 0 &&
       !parsed.semantic
     ) {
@@ -485,7 +502,7 @@
       return;
     }
     if (
-      dialog?.open ||
+      document.querySelector('dialog[open]') ||
       (event.target instanceof HTMLElement &&
         ['INPUT', 'TEXTAREA', 'SELECT'].includes(event.target.tagName))
     )
@@ -615,6 +632,56 @@
         bpm: metaBpm ? Number(metaBpm) : null,
         key: metaKey !== '' ? Number(metaKey) : null,
         mode: metaMode || null,
+      });
+      await load(offset);
+    } catch (e) {
+      fail(e);
+    }
+  }
+  function chooseCollection(collection: Collection) {
+    activeCollection =
+      activeCollection === collection.id ? null : collection.id;
+    activeMap = null;
+    activeRoot = null;
+    tagFilter = null;
+    query = '';
+    similarityAnchor = null;
+    selection = [];
+    mode = 'list';
+    if (scroller) scroller.scrollTop = 0;
+    void load();
+  }
+  async function organized(deleted?: number) {
+    if (activeCollection === deleted) activeCollection = null;
+    await refreshStatus();
+    await load(offset);
+    if (selected) {
+      const page = await invoke<Page>('sample', { id: selected.id });
+      if (page.items[0]) selected = page.items[0];
+    }
+  }
+  async function removeCollectionItems() {
+    try {
+      await invoke('edit_collection_items', {
+        id: activeCollection,
+        ids: selection,
+        remove: true,
+      });
+      selection = [];
+      await refreshStatus();
+      await load();
+    } catch (e) {
+      fail(e);
+    }
+  }
+  async function moveCollectionItem(earlier: boolean) {
+    if (!selected) return;
+    try {
+      similarityAnchor = null;
+      await invoke('move_collection_item', {
+        id: activeCollection,
+        sample: selected.id,
+        earlier,
       });
       await load(offset);
     } catch (e) {
@@ -845,6 +912,7 @@
       onclick={() => {
         mode = 'list';
         activeMap = null;
+        activeCollection = null;
         mapInfo = null;
         mapBuffer = null;
         query = '';
@@ -976,14 +1044,48 @@
             Select a sound to add your first tag.
           </p>{/if}
         {@render tagTree(null)}
+        <button class="manage-rules" onclick={() => organizer?.editRules()}
+          ><Icon name="settings" size={13} />Tag rules</button
+        >
       </section>
       <section>
-        <div class="section-heading"><h2>Collections</h2></div>
-        <p class="sidebar-empty">
-          Your saved groups of sounds.<br /><span class="muted"
-            >Collections are not available yet.</span
+        <div class="section-heading">
+          <h2>Collections</h2>
+          <button
+            class="icon-button"
+            aria-label="New collection"
+            onclick={() => organizer?.editCollection()}
+            ><Icon name="plus" size={15} /></button
           >
-        </p>
+        </div>
+        {#each collections as collection}<div class="source-line">
+            <button
+              class="source-row"
+              class:active={activeCollection === collection.id}
+              onclick={() => chooseCollection(collection)}
+              title={collection.error ??
+                (collection.kind === 'smart'
+                  ? 'Smart collection'
+                  : 'Saved selection')}
+            >
+              <span class="collection-label"
+                ><Icon
+                  name={collection.kind === 'smart' ? 'filter' : 'folder'}
+                  size={13}
+                />{collection.name}</span
+              ><span class="count"
+                >{collection.error ? '!' : count(collection.count)}</span
+              >
+            </button><button
+              class="source-refresh icon-button"
+              aria-label={`Edit ${collection.name}`}
+              onclick={() => organizer?.editCollection(collection)}
+              ><Icon name="settings" size={13} /></button
+            >
+          </div>{/each}
+        {#if !collections.length}<p class="sidebar-empty">
+            Save a selection or make a collection that follows your conditions.
+          </p>{/if}
       </section>
     </div>
     <div class="embedding-status">
@@ -1054,7 +1156,8 @@
       <div class="list-toolbar">
         <div class="result-count">
           <strong>{count(total)}</strong>
-          samples{#if activeRoot}<span
+          samples{#if currentCollection}<span>· {currentCollection.name}</span
+            >{/if}{#if activeRoot}<span
               >· {roots.find((r) => r.id === activeRoot)?.label}</span
             >{/if}{#if activeTag}<span>· #{activeTag}</span
             >{/if}{#if parsed.semantic || similarityAnchor}<span
@@ -1064,7 +1167,10 @@
         <div class="toolbar-actions">
           <button
             class="sort-label"
-            disabled={parsed.semantic || !selected || !embedded}
+            disabled={parsed.semantic ||
+              !selected ||
+              !embedded ||
+              currentCollection?.kind === 'static'}
             onclick={() => {
               sortBySimilarity = !sortBySimilarity;
               similarityAnchor = sortBySimilarity
@@ -1080,7 +1186,9 @@
               ? 'Text similarity'
               : sortBySimilarity && similarityAnchor
                 ? 'Similar to selection'
-                : 'Name ↑'}</button
+                : currentCollection?.kind === 'static'
+                  ? 'Collection order'
+                  : 'Name ↑'}</button
           >
           <div class="column-control">
             <button
@@ -1256,9 +1364,21 @@
       {#if mode === 'map'}<span
           >Hold & trace to audition · Shift+drag to lasso · Right-drag to pan</span
         >{/if}
-      {#if selection.length > 1}<span>{selection.length} selected</span><button
-          onclick={openTag}>+ Tag selection</button
-        >{:else if mode === 'list'}<span
+      {#if selection.length}<span>{selection.length} selected</span><button
+          onclick={openTag}>+ Tag</button
+        ><button onclick={() => organizer?.addSelection()}>+ Collection</button>
+        {#if currentCollection?.kind === 'static'}<button
+            onclick={removeCollectionItems}>Remove from collection</button
+          >
+          {#if selection.length === 1 && mode === 'list'}<button
+              onclick={() => moveCollectionItem(true)}
+              aria-label="Move earlier in collection">↑</button
+            ><button
+              onclick={() => moveCollectionItem(false)}
+              aria-label="Move later in collection">↓</button
+            >{/if}
+        {/if}
+      {:else if mode === 'list'}<span
           ><kbd>↑</kbd><kbd>↓</kbd> select & play</span
         ><span>Shift+click to range-select · Drag a row to your DAW</span>{/if}
     </div>
@@ -1479,7 +1599,9 @@
         ? 'Tag selection'
         : dialogMode === 'source'
           ? 'Add sample source'
-          : 'Audition settings'}
+          : dialogMode === 'map'
+            ? 'New audio map'
+            : 'Audition settings'}
     </h2>
     <button
       class="icon-button"
@@ -1568,3 +1690,14 @@
       <button class="primary-button" type="submit">Save settings</button>
     </form>{/if}
 </dialog>
+
+<Organization
+  bind:this={organizer}
+  {collections}
+  {rules}
+  {roots}
+  {selection}
+  selectedId={selected?.id ?? null}
+  currentQuery={currentMapQuery}
+  ondone={organized}
+/>

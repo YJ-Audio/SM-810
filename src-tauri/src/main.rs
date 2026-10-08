@@ -53,6 +53,8 @@ async fn bootstrap(state: State<'_, App>) -> Reply {
 		Ok(json!({
 			"maps": engine.maps().map_err(|e|e.to_string())?, "layout_active": layout_active,
 			"roots": engine.roots().map_err(|e| e.to_string())?,
+			"collections": engine.collections().map_err(|e|e.to_string())?,
+			"rules": engine.rules().map_err(|e|e.to_string())?,
 			"tags": engine.tags().map_err(|e| e.to_string())?,
 			"jobs": engine.jobs().map_err(|e| e.to_string())?,
 			"audio_error": audio_error,
@@ -264,6 +266,50 @@ fn cancel_layout(state: State<'_, App>) {
 	state.layout_cancel.store(true, Ordering::Release);
 }
 #[tauri::command]
+async fn save_rule(state: State<'_, App>, rule: sampler_engine::organize::Rule) -> Reply {
+	let engine = state.engine.clone();
+	work(move || {
+		engine.save_rule(rule).map_err(|e| e.to_string())?;
+		json_result(engine.apply_rules())
+	})
+	.await
+}
+#[tauri::command]
+async fn apply_rules(state: State<'_, App>) -> Reply {
+	let engine = state.engine.clone();
+	work(move || json_result(engine.apply_rules())).await
+}
+#[tauri::command]
+async fn delete_rule(state: State<'_, App>, id: i64) -> Reply {
+	let engine = state.engine.clone();
+	work(move || json_result(engine.delete_rule(id))).await
+}
+#[tauri::command]
+async fn save_collection(
+	state: State<'_, App>,
+	id: Option<i64>,
+	name: String,
+	query: Option<sampler_engine::query::Query>,
+) -> Reply {
+	let engine = state.engine.clone();
+	work(move || json_result(engine.save_collection(id, name, query))).await
+}
+#[tauri::command]
+async fn edit_collection_items(state: State<'_, App>, id: i64, ids: Vec<i64>, remove: bool) -> Reply {
+	let engine = state.engine.clone();
+	work(move || json_result(engine.edit_collection_items(id, ids, remove))).await
+}
+#[tauri::command]
+async fn move_collection_item(state: State<'_, App>, id: i64, sample: i64, earlier: bool) -> Reply {
+	let engine = state.engine.clone();
+	work(move || json_result(engine.move_collection_item(id, sample, earlier))).await
+}
+#[tauri::command]
+async fn delete_collection(state: State<'_, App>, id: i64) -> Reply {
+	let engine = state.engine.clone();
+	work(move || json_result(engine.delete_collection(id))).await
+}
+#[tauri::command]
 fn start_layout(app: tauri::AppHandle, state: State<'_, App>, id: i64) -> Result<(), String> {
 	if id <= 0 {
 		return Err("Invalid map ID".into());
@@ -376,7 +422,14 @@ fn main() {
 			map_summary,
 			create_map,
 			start_layout,
-			cancel_layout
+			cancel_layout,
+			save_rule,
+			apply_rules,
+			delete_rule,
+			save_collection,
+			edit_collection_items,
+			move_collection_item,
+			delete_collection
 		])
 		.build(tauri::generate_context!())
 		.expect("Tauri application initialization failed")

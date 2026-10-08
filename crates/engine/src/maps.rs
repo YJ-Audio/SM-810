@@ -231,6 +231,7 @@ impl Engine {
 		self.sync_map(id)?;
 		request.map_id = Some(id);
 		self.scope_map(&mut request)?;
+		self.scope_collection(&mut request)?;
 		let matched: HashSet<_> = if request.text.trim_start().starts_with('~') {
 			request.limit = Some(200);
 			request.offset = 0;
