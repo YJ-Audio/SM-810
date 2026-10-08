@@ -17,6 +17,10 @@ jobs:
           cache: npm
           cache-dependency-path: ui/package-lock.json
       - run: npx --yes npm@11 --prefix ui ci
+      - name: Configure libclang on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: '"LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $env:GITHUB_ENV'
       - run: rustup show
       - run: rustup component add rustfmt clippy
       - run: npm --prefix ui run check
@@ -27,3 +31,13 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
       - run: npm --prefix ui run tauri -- build --debug --no-bundle
+      - name: Build Windows installer
+        if: runner.os == 'Windows'
+        run: npm --prefix ui run build:windows
+      - name: Upload Windows installer
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Sampler-windows-x64
+          path: target/release/bundle/nsis/*-setup.exe
+          if-no-files-found: error

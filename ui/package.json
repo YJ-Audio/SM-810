@@ -10,7 +10,8 @@
     "format": "prettier --write .",
     "tauri": "cd .. && tauri",
     "test": "vitest run",
-    "prepare-layout": "node ../tools/layout/build.mjs"
+    "prepare-layout": "node ../tools/layout/build.mjs",
+    "build:windows": "node ../tools/windows/build.mjs"
   },
   "dependencies": {
     "@crabnebula/tauri-plugin-drag": "2.1.0",

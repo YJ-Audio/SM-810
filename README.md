@@ -4,7 +4,7 @@ DTM 用サンプルマネージャー。仕様は [SPEC.md](SPEC.md)、現在の
 
 現在は Tauri 2 + Svelte 5 のデスクトップ版 Map／List UI を起動できます。提供画像を基準に、ダーク配色のソース／タグ、仮想リスト、インスペクタ、波形トランスポートを実装しています。表示・検索・試聴には SQLite 内の実データを使います。
 
-CLAPによる類似上位5件・自然文検索を実装しています。WebGL2マップとなぞり試聴、Rust UMAPサイドカーによる再計算を実装しています。ファイル名／パスのタグルール、手動順の静的コレクション、共通条件式のスマートコレクションを実装しています。Ableton Linkによるループ開始の小節頭同期を実装しています。外付け／ネットワーク／圧縮音声の先頭i16 PCMキャッシュを実装しています。マイルストーン3のDAWドロップ・聴感の実機受け入れは未検証で、Windows環境はユーザー確認により利用できません。
+CLAPによる類似上位5件・自然文検索を実装しています。WebGL2マップとなぞり試聴、Rust UMAPサイドカーによる再計算を実装しています。ファイル名／パスのタグルール、手動順の静的コレクション、共通条件式のスマートコレクションを実装しています。Ableton Linkによるループ開始の小節頭同期を実装しています。外付け／ネットワーク／圧縮音声の先頭i16 PCMキャッシュを実装しています。DAWドロップ・聴感の実機受け入れ状況はACCEPTANCE.mdを参照してください。
 
 ## デスクトップの起動
 
@@ -22,6 +22,28 @@ npm --prefix ui run tauri -- build --debug --bundles app
 ```
 
 生成先は `target/debug/bundle/macos/Sampler.app` です。開発用ビルドで、配布用の署名・公証は行っていません。Windows の実行ファイルは同じプロジェクトを Windows 上で `npm --prefix ui run tauri -- build --debug --no-bundle` により生成します。
+
+### Windows 10 / 11（x64）
+
+開発には [Visual Studio Build Toolsの「C++によるデスクトップ開発」とWebView2](https://v2.tauri.app/start/prerequisites/#windows)、CMake、LLVMのlibclang、Node.js 22.12以上、npm 11、RustのMSVCツールチェーンが必要です。LLVMを標準の場所にインストールした場合、PowerShellで次のように設定します。Visual Studio付属のLLVMを使う場合は、そのlibclang.dllがあるディレクトリを指定してください。
+
+```powershell
+$env:LIBCLANG_PATH = 'C:\Program Files\LLVM\bin'
+npm --prefix ui ci
+npm --prefix ui run tauri -- dev
+```
+
+配布用のインストーラーは、リポジトリルートで次のコマンドから生成します。
+
+```powershell
+npm --prefix ui run build:windows
+```
+
+生成先は `target/release/bundle/nsis/Sampler_0.1.0_x64-setup.exe` です。現在のユーザー向けにインストールし、WebView2がない環境ではTauriのブートストラッパーで取得します。コード署名は行っていません。
+
+スクリプトはreleaseビルド後にDirectML.dll、ONNX Runtimeの追加DLL、Visual Studioの再頒布可能なx64 Visual C++ランタイムを収集して、アプリと同じディレクトリへ同梱します。Map再計算用のsampler-layout.exeも同梱します。`sampler-desktop.exe`だけをコピーするとDLLやサイドカーが欠落するため、配布にはインストーラーを使用してください。利用時にRust・Node.js・Pythonは不要です。
+
+相対パスのタグルールでは、Windowsでも区切り文字に `/` を使用します。ファイル名のルールはフォルダ名を含めずに評価します。
 
 - Sources の「+」でフォルダを追加し、Analyze で解析します。既存の CLI データベースもそのまま開きます。起動中はフォルダの変更を自動監視し、30秒間隔の再走査で通知漏れや再接続にも対応します。
 - 名前の部分一致、`#tag`、ソース／子孫タグを絞り込みに使えます。
