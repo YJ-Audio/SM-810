@@ -7,7 +7,7 @@ use std::{
 		mpsc,
 	},
 	thread::{self, JoinHandle},
-	time::Duration,
+	time::{Duration, Instant},
 };
 use thiserror::Error;
 
@@ -37,6 +37,14 @@ pub struct Position {
 	pub frame: AtomicU64,
 	pub playing: AtomicBool,
 	pub device_error: AtomicBool,
+	pub onset_token: AtomicU64,
+	pub onset_micros: AtomicU64,
+}
+#[derive(Clone, Copy)]
+pub struct Onset {
+	pub token: u64,
+	pub requested: Instant,
+	pub prior_micros: u64,
 }
 pub struct StreamWriter {
 	samples: Producer<f32>,
@@ -91,11 +99,13 @@ pub enum Command {
 		id: u64,
 		buffer: Arc<Buffer>,
 		gain: f32,
+		onset: Option<Onset>,
 	},
 	Stream {
 		id: u64,
 		stream: Box<StreamBuffer>,
 		gain: f32,
+		onset: Option<Onset>,
 	},
 	Stop,
 }
@@ -104,6 +114,7 @@ struct Voice {
 	source: Source,
 	frame: usize,
 	gain: f32,
+	onset: Option<Onset>,
 }
 impl Voice {
 	fn prepare_frame(&mut self) -> bool {
@@ -190,26 +201,53 @@ impl Mixer {
 			self.previous = self.current.take();
 			self.fade = 0;
 			self.current = match command {
-				Command::Play { id, buffer, gain } => Some(Voice {
+				Command::Play {
+					id,
+					buffer,
+					gain,
+					onset,
+				} => Some(Voice {
 					id,
 					source: Source::Buffered(buffer),
 					frame: 0,
 					gain,
+					onset,
 				}),
-				Command::Stream { id, stream, gain } => Some(Voice {
+				Command::Stream {
+					id,
+					stream,
+					gain,
+					onset,
+				} => Some(Voice {
 					id,
 					source: Source::Streaming(stream),
 					frame: 0,
 					gain,
+					onset,
 				}),
 				Command::Stop => None,
 			};
 		}
 	}
 	pub fn render<T: cpal::Sample + cpal::FromSample<f32>>(&mut self, output: &mut [T]) {
+		self.render_with_delay(output, Duration::ZERO);
+	}
+	fn render_with_delay<T: cpal::Sample + cpal::FromSample<f32>>(&mut self, output: &mut [T], delivery: Duration) {
 		self.accept_commands();
 		for frame in output.chunks_mut(self.channels) {
 			let current_ready = self.current.as_mut().is_some_and(Voice::prepare_frame);
+			if current_ready
+				&& let Some(voice) = &mut self.current
+				&& let Some(onset) = voice.onset.take()
+			{
+				// A single monotonic clock read per measured voice; no logs or allocation on the callback.
+				let micros = onset
+					.prior_micros
+					.saturating_add(onset.requested.elapsed().as_micros() as u64)
+					.saturating_add(delivery.as_micros() as u64);
+				self.position.onset_micros.store(micros, Ordering::Relaxed);
+				self.position.onset_token.store(onset.token, Ordering::Release);
+			}
 			let previous_ready = self.previous.as_mut().is_some_and(Voice::prepare_frame);
 			let angle = (self.fade as f32 / self.fade_frames as f32).min(1.0) * std::f32::consts::FRAC_PI_2;
 			let (incoming, outgoing) = angle.sin_cos();
@@ -322,19 +360,47 @@ impl Output {
 		})
 	}
 	pub fn play(&mut self, id: u64, buffer: Arc<Buffer>, gain: f32) -> Result<(), Error> {
+		self.play_measured(id, buffer, gain, None)
+	}
+	pub fn play_measured(
+		&mut self,
+		id: u64,
+		buffer: Arc<Buffer>,
+		gain: f32,
+		onset: Option<Onset>,
+	) -> Result<(), Error> {
 		if buffer.channels == 0 || buffer.frames() == 0 || !gain.is_finite() || gain < 0.0 {
 			return Err(Error::InvalidBuffer);
 		}
 		self.commands
-			.push(Command::Play { id, buffer, gain })
+			.push(Command::Play {
+				id,
+				buffer,
+				gain,
+				onset,
+			})
 			.map_err(|_| Error::QueueFull)
 	}
 	pub fn stream(&mut self, id: u64, stream: Box<StreamBuffer>, gain: f32) -> Result<(), Error> {
+		self.stream_measured(id, stream, gain, None)
+	}
+	pub fn stream_measured(
+		&mut self,
+		id: u64,
+		stream: Box<StreamBuffer>,
+		gain: f32,
+		onset: Option<Onset>,
+	) -> Result<(), Error> {
 		if !gain.is_finite() || gain < 0.0 {
 			return Err(Error::InvalidBuffer);
 		}
 		self.commands
-			.push(Command::Stream { id, stream, gain })
+			.push(Command::Stream {
+				id,
+				stream,
+				gain,
+				onset,
+			})
 			.map_err(|_| Error::QueueFull)
 	}
 	pub fn stop(&mut self) -> Result<(), Error> {
@@ -360,7 +426,11 @@ fn stream<T: cpal::SizedSample + cpal::FromSample<f32>>(
 	device
 		.build_output_stream(
 			config,
-			move |data: &mut [T], _| mixer.render(data),
+			move |data: &mut [T], info| {
+				let timestamp = info.timestamp();
+				let delay = timestamp.playback.duration_since(timestamp.callback);
+				mixer.render_with_delay(data, delay);
+			},
 			move |_| {
 				position.device_error.store(true, Ordering::Release);
 			},
@@ -390,6 +460,7 @@ mod tests {
 				id: 1,
 				buffer: first.clone(),
 				gain: 1.0,
+				onset: None,
 			})
 			.ok()
 			.unwrap();
@@ -405,6 +476,7 @@ mod tests {
 					channels: 1,
 				}),
 				gain: 1.0,
+				onset: None,
 			})
 			.ok()
 			.unwrap();
@@ -435,7 +507,15 @@ mod tests {
 				samples: vec![if id % 2 == 0 { -0.5 } else { 0.5 }; 4096].into_boxed_slice(),
 				channels: 1,
 			});
-			commands.push(Command::Play { id, buffer, gain: 1.0 }).ok().unwrap();
+			commands
+				.push(Command::Play {
+					id,
+					buffer,
+					gain: 1.0,
+					onset: None,
+				})
+				.ok()
+				.unwrap();
 			mixer.render(&mut block);
 			for sample in block {
 				assert!((sample - last).abs() < 0.01);

@@ -56,7 +56,7 @@ impl Engine {
 		sampler_embed::assets::download(&self.model_directory(), progress)?;
 		Ok(())
 	}
-	fn with_model<T>(&self, f: impl FnOnce(&mut Model) -> Result<T>) -> Result<T> {
+	pub(crate) fn with_model<T>(&self, f: impl FnOnce(&mut Model) -> Result<T>) -> Result<T> {
 		let mut model = self
 			.model
 			.lock()
@@ -66,7 +66,7 @@ impl Engine {
 		}
 		f(model.as_mut().expect("model initialized above"))
 	}
-	fn embed_one(&self, id: i64) -> Result<Vec<f32>> {
+	pub(crate) fn embed_one(&self, id: i64) -> Result<Vec<f32>> {
 		if let Some(vector) = self
 			.vectors
 			.read()

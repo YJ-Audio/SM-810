@@ -1,6 +1,6 @@
 [workspace]
-members = ["crates/db", "crates/scan", "crates/engine", "crates/decode", "crates/analysis", "crates/audio", "crates/embed", "crates/similarity", "src-tauri"]
-default-members = [".", "crates/db", "crates/scan", "crates/engine", "crates/decode", "crates/analysis", "crates/audio", "crates/embed", "crates/similarity"]
+members = ["crates/db", "crates/scan", "crates/engine", "crates/decode", "crates/analysis", "crates/audio", "crates/embed", "crates/similarity", "crates/layout", "src-tauri"]
+default-members = [".", "crates/db", "crates/scan", "crates/engine", "crates/decode", "crates/analysis", "crates/audio", "crates/embed", "crates/similarity", "crates/layout"]
 resolver = "3"
 
 [workspace.package]
@@ -10,6 +10,7 @@ license = "MIT"
 publish = false
 
 [workspace.dependencies]
+sampler-layout = { path = "crates/layout" }
 sampler-embed = { path = "crates/embed" }
 sampler-similarity = { path = "crates/similarity" }
 sampler-audio = { path = "crates/audio" }
@@ -44,3 +45,6 @@ directories = "6.0.0"
 [profile.release]
 codegen-units = 1
 lto = true
+
+[profile.dev]
+debug = 1

@@ -2,9 +2,9 @@
 
 DTM 用サンプルマネージャー。仕様は [SPEC.md](SPEC.md)、現在の実装状況と計測値は [PROGRESS.md](PROGRESS.md)、設計判断は [DECISIONS.md](DECISIONS.md) を参照してください。
 
-現在は Tauri 2 + Svelte 5 のデスクトップ版 List UI を起動できます。提供画像を基準に、ダーク配色のソース／タグ、仮想リスト、インスペクタ、波形トランスポートを実装しています。表示・検索・試聴には SQLite 内の実データを使います。
+現在は Tauri 2 + Svelte 5 のデスクトップ版 Map／List UI を起動できます。提供画像を基準に、ダーク配色のソース／タグ、仮想リスト、インスペクタ、波形トランスポートを実装しています。表示・検索・試聴には SQLite 内の実データを使います。
 
-CLAPによる類似上位5件・自然文検索を実装しています。Map、コレクション、タグルール、Ableton Link は未実装です。マイルストーン3のDAWドロップ・聴感の実機受け入れは未検証で、Windows環境はユーザー確認により利用できません。
+CLAPによる類似上位5件・自然文検索を実装しています。WebGL2マップとなぞり試聴、Rust UMAPサイドカーによる再計算を実装しています。コレクション、タグルール、Ableton Link は未実装です。マイルストーン3のDAWドロップ・聴感の実機受け入れは未検証で、Windows環境はユーザー確認により利用できません。
 
 ## デスクトップの起動
 
@@ -28,6 +28,8 @@ npm --prefix ui run tauri -- build --debug --bundles app
 - Similarity index の Enable で約622MBの固定CLAPモデルを取得し、Index sounds で埋め込みを作ります。Pause・終了後も保存済みの続きから再開します。モデル取得後の推論は端末内で行います。
 - `~a deep punchy kick drum` のような自然文で、埋め込み済みの音を検索できます。インスペクタの類似上位5件はクリックで選択・試聴できます。選択後は類似度順を既定とし、↑↓中は並びを固定します。Sort で名前順にも戻せます。
 - クリックまたは ↑↓ で試聴、Space で再生／停止、Escape で選択解除、Cmd/Ctrl+K で検索に移動します。
+- Mapでは左ボタンを押してなぞると試聴し、離した最後の音を選択します。Shift+ドラッグは投げ縄、右／中ドラッグと2本指スクロールはパン、ホイール／ピンチはズームです。Fit viewで全点に表示範囲を合わせます。
+- MapのRecompute layoutは明示したときだけ全体を再計算します。キャンセル中も既存配置で操作でき、追加点は既存8近傍の周辺へ置きます。カテゴリの「+」で現在の条件から新しいマップを作れます。
 - Shift+クリックで範囲選択し、Tag selection でまとめてタグを付けられます。解析済みの BPM／キーはインスペクタで修正できます。
 - Match LUFS、目標 LUFS、±24 半音の移調に対応します。波形は元ファイルの時間軸を表示します。
 - 行または下部波形のドラッグで元ファイルを渡します。両端ハンドルで範囲を調整し、Drag slice から永続 WAV を渡します。初期の全範囲は Prepare slice を押すと書き出せます。
@@ -42,6 +44,7 @@ Rust のバージョンは `rust-toolchain.toml` で固定しています。
 ```sh
 npm --prefix ui run build
 cargo build --release
+npm --prefix ui run prepare-layout
 cargo test --workspace
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings

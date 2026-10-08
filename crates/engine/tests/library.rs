@@ -242,6 +242,7 @@ fn browsing_filters_hierarchy_and_root_before_paging() {
 	let snare = engine.search("snare", 1, 0).unwrap()[0].id;
 	engine.tag(snare, "Drums/One shots/snare").unwrap();
 	let request = sampler_db::BrowseQuery {
+		map_id: None,
 		ids: None,
 		similar_to: None,
 		text: String::new(),
@@ -374,4 +375,192 @@ fn similarity_survives_restart_filters_before_paging_and_separates_model_revisio
 		.unwrap();
 	assert_eq!(page.total, 1);
 	assert_eq!(page.items[0].sample.id, ids[1]);
+}
+
+#[test]
+fn shared_queries_combine_hierarchical_tags_fields_and_negation() {
+	use sampler_engine::query::{Comparison, Field, Query};
+	let dir = tempfile::tempdir().unwrap();
+	let source = dir.path().join("source");
+	fs::create_dir(&source).unwrap();
+	for (i, name) in ["kick", "snare", "pad"].into_iter().enumerate() {
+		fs::write(source.join(format!("{name}.wav")), [i as u8]).unwrap();
+	}
+	let engine = Engine::open(dir.path().join("db")).unwrap();
+	let root = engine.add_root(&source, "Test", Storage::Local).unwrap();
+	engine.scan(root).unwrap();
+	let ids: Vec<_> = ["kick", "snare", "pad"]
+		.into_iter()
+		.map(|name| engine.search(name, 1, 0).unwrap()[0].id)
+		.collect();
+	for &id in &ids[..2] {
+		engine.tag(id, "Drums/one-shot").unwrap();
+	}
+	let id = ids[0];
+	engine.write(move |tx|{tx.execute("INSERT INTO analysis(sample_id,analyzer_ver,duration_ms,sample_rate,channels,lufs,is_loop) VALUES(?1,1,150,48000,1,-10,0)",[id])?;Ok(())}).unwrap();
+	let query = Query::All {
+		conditions: vec![
+			Query::Tag { name: "Drums".into() },
+			Query::Field {
+				field: Field::DurationMs,
+				op: Comparison::Lt,
+				value: 200.0,
+			},
+			Query::Not {
+				condition: Box::new(Query::Text { text: "pad".into() }),
+			},
+		],
+	};
+	let json = serde_json::to_string(&query).unwrap();
+	let decoded: Query = serde_json::from_str(&json).unwrap();
+	assert_eq!(
+		engine.query_ids(&decoded).unwrap(),
+		std::collections::HashSet::from([ids[0]])
+	);
+	assert_eq!(
+		engine
+			.query_ids(&Query::Any {
+				conditions: vec![Query::Text { text: "pad".into() }, Query::Tag { name: "Drums".into() }]
+			})
+			.unwrap()
+			.len(),
+		3
+	);
+	assert_eq!(
+		engine
+			.query_ids(&Query::Not {
+				condition: Box::new(Query::Root { id: root })
+			})
+			.unwrap()
+			.len(),
+		0
+	);
+	assert_eq!(engine.query_ids(&Query::Any { conditions: vec![] }).unwrap().len(), 0);
+	assert_eq!(engine.query_ids(&Query::default()).unwrap().len(), 3);
+}
+
+#[test]
+fn maps_persist_positions_and_dim_filters_without_moving_points() {
+	use sampler_db::BrowseQuery;
+	use sampler_embed::{DIMENSIONS, MODEL};
+	let dir = tempfile::tempdir().unwrap();
+	let source = dir.path().join("sounds");
+	fs::create_dir(&source).unwrap();
+	for i in 0..18 {
+		fs::write(
+			source.join(format!("{}_{}.wav", if i < 9 { "kick" } else { "pad" }, i)),
+			[i as u8],
+		)
+		.unwrap();
+	}
+	let path = dir.path().join("library.db");
+	let engine = Engine::open(&path).unwrap();
+	let root = engine.add_root(&source, "Test", Storage::Local).unwrap();
+	engine.scan(root).unwrap();
+	for sample in engine.search("", 100, 0).unwrap() {
+		let mut vector = vec![0f32; DIMENSIONS];
+		vector[0] = 1.0;
+		vector[1] = sample.id as f32 / 20.0;
+		let bytes: Vec<_> = vector.iter().flat_map(|v| v.to_le_bytes()).collect();
+		engine
+			.write(move |tx| {
+				tx.execute(
+					"INSERT INTO embeddings(model,sample_id,dim,vec) VALUES(?1,?2,?3,?4)",
+					(MODEL, sample.id, DIMENSIONS as i64, bytes),
+				)?;
+				Ok(())
+			})
+			.unwrap();
+	}
+	drop(engine);
+	let engine = Engine::open(&path).unwrap();
+	engine.ensure_maps().unwrap();
+	let id = engine.maps().unwrap()[0].id;
+	let all = engine.map_binary(id, BrowseQuery::default()).unwrap();
+	let filtered = engine
+		.map_binary(
+			id,
+			BrowseQuery {
+				text: "kick".into(),
+				..Default::default()
+			},
+		)
+		.unwrap();
+	assert_eq!(&all[..4], b"MAP1");
+	assert_eq!(u32::from_le_bytes(all[24..28].try_into().unwrap()), 18);
+	let mut matched = 0;
+	for (a, b) in all[32..]
+		.as_chunks::<32>()
+		.0
+		.iter()
+		.zip(filtered[32..].as_chunks::<32>().0)
+	{
+		assert_eq!(&a[..18], &b[..18]);
+		assert_eq!(&a[19..], &b[19..]);
+		if b[18] & 1 != 0 {
+			matched += 1;
+		}
+	}
+	assert_eq!(matched, 9);
+	assert_eq!(engine.map_summary(id).unwrap().provisional, 18);
+	drop(engine);
+	let engine = Engine::open(&path).unwrap();
+	assert_eq!(engine.map_binary(id, BrowseQuery::default()).unwrap(), all);
+	let sidecar = std::env::var_os("SAMPLER_LAYOUT_BIN")
+		.map(std::path::PathBuf::from)
+		.unwrap_or_else(|| {
+			std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+				.join("../../target/debug")
+				.join(if cfg!(windows) {
+					"sampler-layout.exe"
+				} else {
+					"sampler-layout"
+				})
+		});
+	assert!(
+		sidecar.exists(),
+		"Run npm --prefix ui run prepare-layout before workspace tests"
+	);
+	engine.recompute_map(id, &sidecar, || false).unwrap();
+	assert_eq!(engine.map_summary(id).unwrap().layout_rev, 1);
+	assert_eq!(engine.map_summary(id).unwrap().provisional, 0);
+	let first_projection = engine.map_binary(id, BrowseQuery::default()).unwrap();
+	assert!(engine.recompute_map(id, &sidecar, || true).is_err());
+	assert_eq!(engine.map_binary(id, BrowseQuery::default()).unwrap(), first_projection);
+	engine.recompute_map(id, &sidecar, || false).unwrap();
+	let second_projection = engine.map_binary(id, BrowseQuery::default()).unwrap();
+	for (a, b) in first_projection[32..]
+		.as_chunks::<32>()
+		.0
+		.iter()
+		.zip(second_projection[32..].as_chunks::<32>().0)
+	{
+		for offset in [8, 12] {
+			let x = f32::from_le_bytes(a[offset..offset + 4].try_into().unwrap());
+			let y = f32::from_le_bytes(b[offset..offset + 4].try_into().unwrap());
+			assert!((x - y).abs() < 1e-5, "Recomputation must retain orientation and scale");
+		}
+	}
+	drop(engine);
+	let engine = Engine::open(&path).unwrap();
+	assert_eq!(
+		engine.map_binary(id, BrowseQuery::default()).unwrap(),
+		second_projection
+	);
+	let map = engine
+		.maps()
+		.unwrap()
+		.into_iter()
+		.find(|m| m.name.starts_with("Drums"))
+		.unwrap();
+	assert_eq!(
+		engine
+			.browse(BrowseQuery {
+				map_id: Some(map.id),
+				..Default::default()
+			})
+			.unwrap()
+			.total,
+		9
+	);
 }

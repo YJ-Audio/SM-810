@@ -6,6 +6,8 @@
   import { startDrag } from '@crabnebula/tauri-plugin-drag';
   import Icon from './Icon.svelte';
   import Waveform from './Waveform.svelte';
+  import MapCanvas from './MapCanvas.svelte';
+  let mapCanvas = $state<ReturnType<typeof MapCanvas>>();
   import { keys, kind, parseSearch } from './types';
   import type {
     Sample,
@@ -16,8 +18,20 @@
     Bootstrap,
     Wave,
     Playback,
+    MapSummary,
   } from './types';
 
+  let maps = $state<MapSummary[]>([]),
+    activeMap = $state<number | null>(null),
+    mapInfo = $state<MapSummary | null>(null),
+    mapBuffer = $state.raw<ArrayBuffer | null>(null),
+    layoutActive = $state(0);
+  let coloring = $state(0),
+    loudnessSize = $state(true),
+    traceLabel = $state(''),
+    traceId = 0,
+    traceRevision = 0,
+    mapName = $state('');
   let modelReady = $state(false),
     embedding = $state(false),
     embedded = $state(0),
@@ -68,7 +82,7 @@
     scroller = $state<HTMLDivElement>(undefined!),
     dialog = $state<HTMLDialogElement>(undefined!),
     waveBox = $state<HTMLDivElement>(undefined!);
-  let dialogMode = $state<'tag' | 'settings' | 'source'>('tag'),
+  let dialogMode = $state<'tag' | 'settings' | 'source' | 'map'>('tag'),
     tagName = $state(''),
     sourcePath = $state(''),
     sourceLabel = $state(''),
@@ -135,6 +149,7 @@
     text: parsed.text,
     tag: activeTag,
     root_id: activeRoot,
+    map_id: activeMap,
     similar_to: sortBySimilarity && !parsed.semantic ? similarityAnchor : null,
     offset: start,
     limit,
@@ -142,6 +157,8 @@
 
   async function refreshStatus() {
     const data = await invoke<Bootstrap>('bootstrap');
+    maps = data.maps;
+    layoutActive = data.layout_active;
     roots = data.roots;
     tags = data.tags;
     jobs = data.jobs;
@@ -198,7 +215,112 @@
   async function pauseIndexing() {
     await invoke('pause_embedding').catch(fail);
   }
+  async function loadMap() {
+    if (!activeMap) activeMap = maps[0]?.id ?? null;
+    if (!activeMap) return;
+    const revision = ++request;
+    loading = true;
+    try {
+      const result = await invoke<ArrayBuffer>('map_points', {
+        id: activeMap,
+        query: browseQuery(),
+      });
+      if (revision !== request) return;
+      mapBuffer = result;
+      total = new DataView(result).getUint32(24, true);
+      const info = await invoke<MapSummary>('map_summary', { id: activeMap });
+      if (revision === request) mapInfo = info;
+    } catch (e) {
+      if (revision === request) fail(e);
+    } finally {
+      if (revision === request) loading = false;
+    }
+  }
+  function showMap() {
+    mode = 'map';
+    void loadMap();
+  }
+  function chooseMap(id: number) {
+    activeMap = id;
+    mapBuffer = null;
+    mapInfo = null;
+    void loadMap();
+  }
+  async function selectFromMap(id: number) {
+    const revision = ++traceRevision;
+    try {
+      const page = await invoke<Page>('sample', { id });
+      if (revision === traceRevision && page.items[0])
+        await select(page.items[0], 0, false, false, false);
+    } catch (e) {
+      fail(e);
+    }
+  }
+  function trace(id: number | null) {
+    if (id === null) {
+      stop();
+      traceLabel = '';
+      return;
+    }
+    traceId = id;
+    const issuedMs = Date.now();
+    void invoke('audition', {
+      id,
+      settings: settings(),
+      issuedMs,
+      probe: issuedMs,
+    }).catch(fail);
+    void invoke<Page>('sample', { id })
+      .then((page) => {
+        if (traceId === id) traceLabel = page.items[0]?.name ?? '';
+      })
+      .catch(() => {});
+  }
+  function prefetchMap(ids: number[]) {
+    void invoke('prefetch', { ids, settings: settings() }).catch(() => {});
+  }
+  function mapSelection(ids: number[]) {
+    selection = ids;
+  }
+  function currentMapQuery(): Record<string, unknown> {
+    const conditions: Record<string, unknown>[] = [];
+    if (activeMap) {
+      const query = maps.find((m) => m.id === activeMap)?.query;
+      if (query) conditions.push(query);
+    }
+    if (activeRoot) conditions.push({ type: 'root', id: activeRoot });
+    if (activeTag) conditions.push({ type: 'tag', name: activeTag });
+    if (parsed.text)
+      conditions.push(
+        parsed.semantic
+          ? { type: 'semantic', text: parsed.text.slice(1).trim(), count: 200 }
+          : { type: 'text', text: parsed.text },
+      );
+    return { type: 'all', conditions };
+  }
+  async function saveMap() {
+    dialog.close();
+    try {
+      await invoke('create_map', { name: mapName, query: currentMapQuery() });
+      await refreshStatus();
+      activeMap = maps.at(-1)?.id ?? null;
+      mode = 'map';
+      await loadMap();
+    } catch (e) {
+      fail(e);
+    }
+  }
+  async function recompute() {
+    if (!activeMap) return;
+    try {
+      await invoke('start_layout', { id: activeMap });
+      layoutActive = activeMap;
+    } catch (e) {
+      fail(e);
+    }
+  }
   async function load(start = 0) {
+    if (mode === 'map') return loadMap();
     const revision = ++request;
     loading = true;
     try {
@@ -273,6 +395,7 @@
     index: number,
     range = false,
     reorder = true,
+    autoplay = true,
   ) {
     const revision = ++detailRequest;
     if (range) {
@@ -301,7 +424,7 @@
     metaBpm = sample.analysis?.bpm?.toString() ?? '';
     metaKey = sample.analysis?.key_root?.toString() ?? '';
     metaMode = sample.analysis?.key_mode ?? '';
-    play(sample);
+    if (autoplay) play(sample);
     void findSimilar(sample);
     if (
       reorder &&
@@ -721,6 +844,9 @@
       class="brand"
       onclick={() => {
         mode = 'list';
+        activeMap = null;
+        mapInfo = null;
+        mapBuffer = null;
         query = '';
         similarityAnchor = null;
         filterRoot(null);
@@ -731,10 +857,13 @@
       ><strong>Library</strong></button
     >
     <nav class="view-switch" aria-label="Library view">
-      <button class:chosen={mode === 'map'} onclick={() => (mode = 'map')}
-        >Map</button
-      ><button class:chosen={mode === 'list'} onclick={() => (mode = 'list')}
-        >List</button
+      <button class:chosen={mode === 'map'} onclick={showMap}>Map</button
+      ><button
+        class:chosen={mode === 'list'}
+        onclick={() => {
+          mode = 'list';
+          void load();
+        }}>List</button
       >
     </nav>
     <div class="search">
@@ -921,50 +1050,56 @@
   </aside>
 
   <main class="workspace">
-    <div class="list-toolbar">
-      <div class="result-count">
-        <strong>{count(total)}</strong> samples{#if activeRoot}<span
-            >· {roots.find((r) => r.id === activeRoot)?.label}</span
-          >{/if}{#if activeTag}<span>· #{activeTag}</span
-          >{/if}{#if parsed.semantic || similarityAnchor}<span
-            >· indexed sounds</span
-          >{/if}{#if loading}<span class="loading-dot"></span>{/if}
-      </div>
-      <div class="toolbar-actions">
-        <button
-          class="sort-label"
-          disabled={parsed.semantic || !selected || !embedded}
-          onclick={() => {
-            sortBySimilarity = !sortBySimilarity;
-            similarityAnchor = sortBySimilarity ? (selected?.id ?? null) : null;
-            if (scroller) scroller.scrollTop = 0;
-            void load();
-          }}
-          title={similarityAnchor
-            ? 'The order stays fixed while using arrow keys'
-            : 'Sort by similarity to the selected sound'}
-          >Sort: {parsed.semantic
-            ? 'Text similarity'
-            : sortBySimilarity && similarityAnchor
-              ? 'Similar to selection'
-              : 'Name ↑'}</button
-        >
-        <div class="column-control">
+    {#if mode === 'list'}
+      <div class="list-toolbar">
+        <div class="result-count">
+          <strong>{count(total)}</strong>
+          samples{#if activeRoot}<span
+              >· {roots.find((r) => r.id === activeRoot)?.label}</span
+            >{/if}{#if activeTag}<span>· #{activeTag}</span
+            >{/if}{#if parsed.semantic || similarityAnchor}<span
+              >· indexed sounds</span
+            >{/if}{#if loading}<span class="loading-dot"></span>{/if}
+        </div>
+        <div class="toolbar-actions">
           <button
-            class="outline-button"
-            onclick={() => (columnsOpen = !columnsOpen)}
-            >Columns <Icon name="settings" size={14} /></button
-          >{#if columnsOpen}<div class="popover">
-              <label
-                ><input type="checkbox" bind:checked={showTags} />Tags</label
-              ><label
-                ><input type="checkbox" bind:checked={showRoot} />Root</label
-              ><label><input type="checkbox" bind:checked={showBpm} />BPM</label
-              >
-            </div>{/if}
+            class="sort-label"
+            disabled={parsed.semantic || !selected || !embedded}
+            onclick={() => {
+              sortBySimilarity = !sortBySimilarity;
+              similarityAnchor = sortBySimilarity
+                ? (selected?.id ?? null)
+                : null;
+              if (scroller) scroller.scrollTop = 0;
+              void load();
+            }}
+            title={similarityAnchor
+              ? 'The order stays fixed while using arrow keys'
+              : 'Sort by similarity to the selected sound'}
+            >Sort: {parsed.semantic
+              ? 'Text similarity'
+              : sortBySimilarity && similarityAnchor
+                ? 'Similar to selection'
+                : 'Name ↑'}</button
+          >
+          <div class="column-control">
+            <button
+              class="outline-button"
+              onclick={() => (columnsOpen = !columnsOpen)}
+              >Columns <Icon name="settings" size={14} /></button
+            >{#if columnsOpen}<div class="popover">
+                <label
+                  ><input type="checkbox" bind:checked={showTags} />Tags</label
+                ><label
+                  ><input type="checkbox" bind:checked={showRoot} />Root</label
+                ><label
+                  ><input type="checkbox" bind:checked={showBpm} />BPM</label
+                >
+              </div>{/if}
+          </div>
         </div>
       </div>
-    </div>
+    {/if}
     {#if mode === 'list'}
       <div class="table-header" style:grid-template-columns={columnTemplate}>
         <span>Wave</span><span>Name</span>{#if showTags}<span>Tags</span
@@ -1049,23 +1184,83 @@
               >{/if}
           </div>{/if}
       </div>
-    {:else}<div class="map-pending">
-        <div class="map-symbol"><Icon name="grid" size={36} /></div>
-        <h2>Explore sounds by similarity</h2>
-        <p>
-          Audio maps are not available yet.<br />Your library is ready to browse
-          and audition in List view.
-        </p>
-        <button class="outline-button" onclick={() => (mode = 'list')}
-          >Browse library <Icon name="arrow" size={15} /></button
-        >
-      </div>{/if}
+    {:else}
+      <div class="map-toolbar">
+        <nav aria-label="Audio maps">
+          {#each maps as map}<button
+              class:active={activeMap === map.id}
+              onclick={() => chooseMap(map.id)}>{map.name}</button
+            >{/each}<button
+            class="add-map"
+            aria-label="Create map from current filters"
+            onclick={() => {
+              mapName = 'New map';
+              dialogMode = 'map';
+              dialog.showModal();
+            }}>+</button
+          >
+        </nav>
+        <div class="map-appearance">
+          <button onclick={() => mapCanvas?.fit()}>Fit view</button>
+          <label
+            >Color <select aria-label="Map color" bind:value={coloring}
+              ><option value={0}>Type</option><option value={1}>Key</option
+              ><option value={2}>Length</option></select
+            ></label
+          ><button
+            aria-pressed={loudnessSize}
+            onclick={() => (loudnessSize = !loudnessSize)}
+            >Size: {loudnessSize ? 'Loudness' : 'Uniform'}</button
+          >
+        </div>
+      </div>
+      <MapCanvas
+        bind:this={mapCanvas}
+        buffer={mapBuffer}
+        {selection}
+        playing={playback.playing ? playback.sample_id : 0}
+        similar={neighbors.map((n) => n.id)}
+        {coloring}
+        {loudnessSize}
+        labels={mapInfo?.labels ?? []}
+        {traceLabel}
+        seconds={playback.seconds}
+        onselect={selectFromMap}
+        onaudition={trace}
+        onprefetch={prefetchMap}
+        onlasso={mapSelection}
+      />
+      <div class="map-bottom">
+        <div class="map-legend">
+          <span>{count(total)} sounds</span>
+          <span style:color="#ffbd47">● Kick</span><span style:color="#668cfa"
+            >● Snare / Clap</span
+          ><span style:color="#e3e7ea">● Hat</span><span style:color="#42c5ae"
+            >● Percussion</span
+          ><span style:color="#bf94f0">● Bass</span>
+        </div>
+        <button
+          class="outline-button"
+          disabled={!!layoutActive || !mapInfo?.points}
+          onclick={recompute}
+          >{layoutActive
+            ? 'Recomputing…'
+            : `${count(mapInfo?.provisional ?? 0)} provisional · Recompute layout`}</button
+        >{#if layoutActive}<button
+            class="outline-button"
+            onclick={() => invoke('cancel_layout').catch(fail)}>Cancel</button
+          >{/if}
+      </div>
+    {/if}
     <div class="list-footer">
+      {#if mode === 'map'}<span
+          >Hold & trace to audition · Shift+drag to lasso · Right-drag to pan</span
+        >{/if}
       {#if selection.length > 1}<span>{selection.length} selected</span><button
           onclick={openTag}>+ Tag selection</button
-        >{:else}<span><kbd>↑</kbd><kbd>↓</kbd> select & play</span><span
-          >Shift+click to range-select · Drag a row to your DAW</span
-        >{/if}
+        >{:else if mode === 'list'}<span
+          ><kbd>↑</kbd><kbd>↓</kbd> select & play</span
+        ><span>Shift+click to range-select · Drag a row to your DAW</span>{/if}
     </div>
     <div class="transport" class:empty={!selected}>
       <div class="transport-info">
@@ -1309,6 +1504,20 @@
         placeholder="Drums/kick"
         required
       /><button class="primary-button" type="submit">Add tag</button>
+    </form>
+  {:else if dialogMode === 'map'}<form
+      onsubmit={(e) => {
+        e.preventDefault();
+        void saveMap();
+      }}
+    >
+      <p>Save the current search, source and tag filters as an audio map.</p>
+      <label for="map-name">Map name</label><input
+        id="map-name"
+        bind:value={mapName}
+        required
+        maxlength="100"
+      /><button class="primary-button" type="submit">Create map</button>
     </form>
   {:else if dialogMode === 'source'}<form
       onsubmit={(e) => {

@@ -1,3 +1,4 @@
+pub mod layout;
 use rayon::prelude::*;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
@@ -60,6 +61,30 @@ impl Store {
 			index: HashMap::new(),
 			vectors: Vec::new(),
 		}
+	}
+	pub fn from_vectors(ids: Vec<i64>, mut vectors: Vec<f32>, dimensions: usize) -> Result<Self, Error> {
+		if dimensions == 0 || vectors.len() != ids.len().saturating_mul(dimensions) {
+			return Err(Error::Dimensions);
+		}
+		let index: HashMap<_, _> = ids.iter().enumerate().map(|(index, &id)| (id, index)).collect();
+		if index.len() != ids.len() {
+			return Err(Error::Invalid);
+		}
+		for row in vectors.chunks_exact_mut(dimensions) {
+			normalize(row)?;
+		}
+		Ok(Self {
+			dimensions,
+			ids,
+			index,
+			vectors,
+		})
+	}
+	pub fn vectors(&self) -> &[f32] {
+		&self.vectors
+	}
+	pub fn ids(&self) -> &[i64] {
+		&self.ids
 	}
 	pub fn len(&self) -> usize {
 		self.ids.len()

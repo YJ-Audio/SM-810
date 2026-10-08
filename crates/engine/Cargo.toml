@@ -6,6 +6,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+sampler-layout.workspace = true
 sampler-embed.workspace = true
 sampler-similarity.workspace = true
 sampler-audio.workspace = true

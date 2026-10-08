@@ -41,6 +41,8 @@ export type Tag = {
 };
 export type Job = { kind: string; state: string; count: number };
 export type Bootstrap = {
+  maps: MapSummary[];
+  layout_active: number;
   roots: Root[];
   tags: Tag[];
   jobs: Job[];
@@ -114,3 +116,13 @@ export function waveformPath(
     return `M${x.toFixed(2)},${(height / 2 - (peaks[i * 2 + 1] / 127) * height * 0.45).toFixed(2)}V${(height / 2 - (peaks[i * 2] / 127) * height * 0.45).toFixed(2)}`;
   }).join('');
 }
+
+export type MapSummary = {
+  id: number;
+  name: string;
+  query: Record<string, unknown>;
+  layout_rev: number;
+  points: number;
+  provisional: number;
+  labels: { x: number; y: number; text: string }[];
+};

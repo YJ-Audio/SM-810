@@ -15,6 +15,7 @@ fn mixer(c: &mut Criterion) {
 						id: 1,
 						buffer: buffer.clone(),
 						gain: 1.0,
+						onset: None,
 					})
 					.ok()
 					.unwrap();
@@ -37,6 +38,7 @@ fn mixer(c: &mut Criterion) {
 						id: 1,
 						stream,
 						gain: 1.0,
+						onset: None,
 					})
 					.ok()
 					.unwrap();

@@ -1,5 +1,5 @@
 use crate::{Engine, Error, Result};
-use sampler_audio::{Buffer, Output, Position, StreamBuffer, StreamWriter, matched_gain};
+use sampler_audio::{Buffer, Onset, Output, Position, StreamBuffer, StreamWriter, matched_gain};
 use serde::{Deserialize, Serialize};
 use std::{
 	collections::VecDeque,
@@ -9,7 +9,7 @@ use std::{
 		mpsc::{self, SyncSender},
 	},
 	thread::{self, JoinHandle},
-	time::Duration,
+	time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -33,6 +33,7 @@ struct Request {
 	prefetch: bool,
 	settings: Settings,
 	revision: u64,
+	onset: Option<Onset>,
 }
 #[derive(Serialize)]
 pub struct Status {
@@ -40,6 +41,8 @@ pub struct Status {
 	pub seconds: f64,
 	pub playing: bool,
 	pub error: Option<String>,
+	pub onset_token: u64,
+	pub onset_micros: u64,
 }
 pub struct Auditioner {
 	prefetch_sender: Option<SyncSender<Request>>,
@@ -50,6 +53,8 @@ pub struct Auditioner {
 	rate: u32,
 	error: Arc<Mutex<Option<String>>>,
 	output: Arc<Mutex<Output>>,
+	last_probe: AtomicU64,
+	trace_latency: bool,
 }
 impl Auditioner {
 	pub fn open(engine: Arc<Engine>) -> Result<Self> {
@@ -107,7 +112,7 @@ impl Auditioner {
 								.lock()
 								.map_err(|_| Error::Invalid("Audio control lock poisoned".into()))?;
 							if current.load(Ordering::Acquire) == request.revision {
-								output.play(id as u64, buffer.clone(), gain)?;
+								output.play_measured(id as u64, buffer.clone(), gain, request.onset)?;
 							}
 							return Ok(());
 						}
@@ -126,7 +131,7 @@ impl Auditioner {
 							if current.load(Ordering::Acquire) != request.revision {
 								return Ok(());
 							}
-							output.stream(id as u64, stream, gain)?;
+							output.stream_measured(id as u64, stream, gain, request.onset)?;
 							writer = Some(producer);
 						}
 						sampler_decode::stream(&engine.file_path(id)?, rate, request.settings.semitones, |packet| {
@@ -161,7 +166,7 @@ impl Auditioner {
 									if current.load(Ordering::Acquire) != request.revision {
 										return Ok(false);
 									}
-									output.stream(id as u64, stream, gain)?;
+									output.stream_measured(id as u64, stream, gain, request.onset)?;
 									drop(output);
 									writer = Some(producer);
 									return Ok(write_stream(
@@ -226,9 +231,29 @@ impl Auditioner {
 			rate,
 			error,
 			output,
+			last_probe: AtomicU64::new(0),
+			trace_latency: std::env::var_os("SAMPLER_TRACE_LATENCY").is_some(),
 		})
 	}
 	pub fn play(&self, id: Option<i64>, settings: Settings) -> Result<()> {
+		self.play_measured(id, settings, None, None)
+	}
+	pub fn play_measured(
+		&self,
+		id: Option<i64>,
+		settings: Settings,
+		issued_ms: Option<f64>,
+		token: Option<u64>,
+	) -> Result<()> {
+		let onset = issued_ms.zip(token).and_then(|(issued, token)| {
+			let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs_f64() * 1000.0;
+			let prior = now - issued;
+			(issued.is_finite() && (0.0..10000.0).contains(&prior) && token > 0).then(|| Onset {
+				token,
+				requested: Instant::now(),
+				prior_micros: (prior * 1000.0) as u64,
+			})
+		});
 		if !(-24..=24).contains(&settings.semitones)
 			|| !settings.target_lufs.is_finite()
 			|| !(-36.0..=-6.0).contains(&settings.target_lufs)
@@ -251,6 +276,7 @@ impl Auditioner {
 				settings,
 				revision,
 				prefetch: false,
+				onset,
 			})
 			.map_err(|_| Error::Busy)
 	}
@@ -266,11 +292,18 @@ impl Auditioner {
 					settings,
 					revision,
 					prefetch: true,
+					onset: None,
 				});
 			}
 		}
 	}
 	pub fn status(&self) -> Status {
+		let onset_token = self.position.onset_token.load(Ordering::Acquire);
+		let onset_micros = self.position.onset_micros.load(Ordering::Relaxed);
+		if self.trace_latency && onset_token > 0 && self.last_probe.swap(onset_token, Ordering::Relaxed) != onset_token
+		{
+			eprintln!("onset_probe token={onset_token} scheduled_micros={onset_micros}");
+		}
 		let error = if self.position.device_error.load(Ordering::Acquire) {
 			Some("Audio output device disconnected. Restart the application to reconnect.".into())
 		} else {
@@ -281,6 +314,8 @@ impl Auditioner {
 			seconds: self.position.frame.load(Ordering::Relaxed) as f64 / self.rate as f64,
 			playing: self.position.playing.load(Ordering::Acquire),
 			error,
+			onset_token,
+			onset_micros,
 		}
 	}
 }

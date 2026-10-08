@@ -1,0 +1,21 @@
+{
+  "date": "2026-10-08",
+  "cpu": "Apple M4",
+  "os": "macOS 15.7.9",
+  "webview": "WKWebView / WebKit WebGL",
+  "points": 100000,
+  "synthetic": true,
+  "frames": 600,
+  "warmup_frames": 60,
+  "zoom_range": [0.2, 1.0],
+  "hit_radius_css_px": 12,
+  "prefetch_radius_css_px": 80,
+  "fps": 60.0480384307446,
+  "p95_interval_ms": 18,
+  "over_25ms": 0,
+  "mean_cpu_ms": 0.7316666666666735,
+  "viewport_css_px": [1480, 932],
+  "dpr": 2,
+  "parallel_cargo_build": false,
+  "windows_verified": false
+}

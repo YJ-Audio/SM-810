@@ -16,6 +16,8 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 pub enum Error {
 	#[error(transparent)]
+	Layout(#[from] sampler_layout::Error),
+	#[error(transparent)]
 	Embed(#[from] sampler_embed::Error),
 	#[error(transparent)]
 	Similarity(#[from] sampler_similarity::Error),
@@ -53,6 +55,7 @@ pub struct Engine {
 	vectors: RwLock<sampler_similarity::Store>,
 	model: Mutex<Option<sampler_embed::Model>>,
 	embedding_lock: Mutex<()>,
+	map_lock: Mutex<()>,
 	_process_lock: File,
 	path: PathBuf,
 	sender: Option<SyncSender<Request>>,
@@ -121,6 +124,7 @@ impl Engine {
 			vectors: RwLock::new(vectors),
 			model: Mutex::new(None),
 			embedding_lock: Mutex::new(()),
+			map_lock: Mutex::new(()),
 			_process_lock: process_lock,
 			path,
 			sender: Some(sender),
@@ -380,3 +384,7 @@ pub mod audition;
 mod desktop;
 
 mod embedding;
+
+pub mod query;
+
+pub mod maps;

@@ -8,7 +8,7 @@ use std::{
 	path::PathBuf,
 	sync::{
 		Arc, Mutex,
-		atomic::{AtomicBool, AtomicU64, Ordering},
+		atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
 	},
 	time::Duration,
 };
@@ -22,6 +22,8 @@ struct App {
 	embedding: Arc<AtomicBool>,
 	pause_embedding: Arc<AtomicBool>,
 	downloading: Arc<AtomicBool>,
+	layout_active: Arc<AtomicI64>,
+	layout_cancel: Arc<AtomicBool>,
 	download_bytes: Arc<AtomicU64>,
 	download_total: Arc<AtomicU64>,
 }
@@ -46,8 +48,10 @@ async fn bootstrap(state: State<'_, App>) -> Reply {
 	let downloading = state.downloading.load(Ordering::Acquire);
 	let download_bytes = state.download_bytes.load(Ordering::Relaxed);
 	let download_total = state.download_total.load(Ordering::Relaxed);
+	let layout_active = state.layout_active.load(Ordering::Acquire);
 	work(move || {
 		Ok(json!({
+			"maps": engine.maps().map_err(|e|e.to_string())?, "layout_active": layout_active,
 			"roots": engine.roots().map_err(|e| e.to_string())?,
 			"tags": engine.tags().map_err(|e| e.to_string())?,
 			"jobs": engine.jobs().map_err(|e| e.to_string())?,
@@ -77,12 +81,18 @@ async fn waveform(state: State<'_, App>, id: i64) -> Reply {
 	work(move || json_result(engine.waveform(id))).await
 }
 #[tauri::command]
-fn audition(state: State<'_, App>, id: Option<i64>, settings: Settings) -> Result<(), String> {
+fn audition(
+	state: State<'_, App>,
+	id: Option<i64>,
+	settings: Settings,
+	issued_ms: Option<f64>,
+	probe: Option<u64>,
+) -> Result<(), String> {
 	let guard = state.audio.lock().map_err(|e| e.to_string())?;
 	guard
 		.as_ref()
 		.ok_or_else(|| state.audio_error.clone().unwrap_or("Audio unavailable".into()))?
-		.play(id, settings)
+		.play_measured(id, settings, issued_ms, probe)
 		.map_err(|e| e.to_string())
 }
 #[tauri::command]
@@ -214,6 +224,83 @@ async fn download_model(state: State<'_, App>) -> Reply {
 	})
 	.await
 }
+#[tauri::command]
+async fn sample(state: State<'_, App>, id: i64) -> Reply {
+	let engine = state.engine.clone();
+	work(move || {
+		json_result(engine.browse(sampler_db::BrowseQuery {
+			ids: Some(vec![id]),
+			limit: Some(1),
+			..Default::default()
+		}))
+	})
+	.await
+}
+#[tauri::command]
+async fn map_points(
+	state: State<'_, App>,
+	id: i64,
+	query: sampler_db::BrowseQuery,
+) -> Result<tauri::ipc::Response, String> {
+	let engine = state.engine.clone();
+	tauri::async_runtime::spawn_blocking(move || engine.map_binary(id, query))
+		.await
+		.map_err(|e| e.to_string())?
+		.map(tauri::ipc::Response::new)
+		.map_err(|e| e.to_string())
+}
+#[tauri::command]
+async fn map_summary(state: State<'_, App>, id: i64) -> Reply {
+	let engine = state.engine.clone();
+	work(move || json_result(engine.map_summary(id))).await
+}
+#[tauri::command]
+async fn create_map(state: State<'_, App>, name: String, query: sampler_engine::query::Query) -> Reply {
+	let engine = state.engine.clone();
+	work(move || json_result(engine.create_map(name, query))).await
+}
+#[tauri::command]
+fn cancel_layout(state: State<'_, App>) {
+	state.layout_cancel.store(true, Ordering::Release);
+}
+#[tauri::command]
+fn start_layout(app: tauri::AppHandle, state: State<'_, App>, id: i64) -> Result<(), String> {
+	if id <= 0 {
+		return Err("Invalid map ID".into());
+	}
+	state
+		.layout_active
+		.compare_exchange(0, id, Ordering::AcqRel, Ordering::Acquire)
+		.map_err(|_| "A layout is already being recomputed")?;
+	state.layout_cancel.store(false, Ordering::Release);
+	let engine = state.engine.clone();
+	let active = state.layout_active.clone();
+	let cancel = state.layout_cancel.clone();
+	let program = std::env::var_os("SAMPLER_LAYOUT_BIN").map(PathBuf::from).or_else(|| {
+		std::env::current_exe().ok().and_then(|p| {
+			p.parent().map(|p| {
+				p.join(if cfg!(windows) {
+					"sampler-layout.exe"
+				} else {
+					"sampler-layout"
+				})
+			})
+		})
+	});
+	std::thread::spawn(move || {
+		let result = program
+			.ok_or_else(|| sampler_engine::Error::Invalid("Layout sidecar was not found".into()))
+			.and_then(|program| engine.recompute_map(id, &program, || cancel.load(Ordering::Acquire)));
+		active.store(0, Ordering::Release);
+		let error = if cancel.load(Ordering::Acquire) {
+			None
+		} else {
+			result.err().map(|e| e.to_string())
+		};
+		let _ = app.emit("library-updated", error);
+	});
+	Ok(())
+}
 fn main() {
 	tauri::Builder::default()
 		.plugin(tauri_plugin_dialog::init())
@@ -226,6 +313,7 @@ fn main() {
 				.map(PathBuf::from)
 				.unwrap_or_else(|| dirs.data_local_dir().join("library.sqlite3"));
 			let engine = Arc::new(Engine::open(path)?);
+			engine.ensure_maps()?;
 			let (audio, audio_error) = match Auditioner::open(engine.clone()) {
 				Ok(audio) => (Some(audio), None),
 				Err(error) => (None, Some(error.to_string())),
@@ -238,9 +326,18 @@ fn main() {
 				embedding: Arc::new(AtomicBool::new(false)),
 				pause_embedding: Arc::new(AtomicBool::new(false)),
 				downloading: Arc::new(AtomicBool::new(false)),
+				layout_active: Arc::new(AtomicI64::new(0)),
+				layout_cancel: Arc::new(AtomicBool::new(false)),
 				download_bytes: Arc::new(AtomicU64::new(0)),
 				download_total: Arc::new(AtomicU64::new(0)),
 			});
+			if std::env::var_os("SAMPLER_MAP_BENCH").is_some() {
+				let window = app.get_webview_window("main").ok_or("No benchmark window")?;
+				let mut url = window.url()?;
+				url.set_path("/bench.html");
+				window.navigate(url)?;
+				window.set_title("Sampler · Map Benchmark")?;
+			}
 			let handle = app.handle().clone();
 			std::thread::spawn(move || {
 				loop {
@@ -273,8 +370,27 @@ fn main() {
 			similar,
 			start_embedding,
 			pause_embedding,
-			download_model
+			download_model,
+			sample,
+			map_points,
+			map_summary,
+			create_map,
+			start_layout,
+			cancel_layout
 		])
-		.run(tauri::generate_context!())
-		.expect("Tauri application initialization failed");
+		.build(tauri::generate_context!())
+		.expect("Tauri application initialization failed")
+		.run(|app, event| {
+			if matches!(event, tauri::RunEvent::ExitRequested { .. }) {
+				let state = app.state::<App>();
+				state.layout_cancel.store(true, Ordering::Release);
+				// Reap the sidecar before the process exits so cancelled work cannot remain orphaned.
+				for _ in 0..100 {
+					if state.layout_active.load(Ordering::Acquire) == 0 {
+						break;
+					}
+					std::thread::sleep(Duration::from_millis(10));
+				}
+			}
+		});
 }

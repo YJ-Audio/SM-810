@@ -225,6 +225,7 @@ pub struct Sample {
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct BrowseQuery {
+	pub map_id: Option<i64>,
 	pub ids: Option<Vec<i64>>,
 	pub similar_to: Option<i64>,
 	#[serde(default)]

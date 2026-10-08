@@ -1,8 +1,9 @@
-use sampler_audio::{Buffer, Command, Mixer, StreamBuffer};
+use sampler_audio::{Buffer, Command, Mixer, Onset, StreamBuffer};
 use std::{
 	alloc::{GlobalAlloc, Layout, System},
 	cell::Cell,
 	sync::Arc,
+	time::Instant,
 };
 thread_local! {static TRACK:Cell<bool>=const {Cell::new(false)};static ALLOCS:Cell<usize>=const {Cell::new(0)};static FREES:Cell<usize>=const {Cell::new(0)};}
 struct TrackingAllocator;
@@ -31,7 +32,16 @@ fn callback_does_not_allocate_or_free_when_garbage_queue_fills() {
 			samples: vec![0.2; 4096].into_boxed_slice(),
 			channels: 2,
 		});
-		let _ = commands.push(Command::Play { id, buffer, gain: 1.0 });
+		let _ = commands.push(Command::Play {
+			id,
+			buffer,
+			gain: 1.0,
+			onset: Some(Onset {
+				token: id,
+				requested: Instant::now(),
+				prior_micros: 0,
+			}),
+		});
 		TRACK.set(true);
 		mixer.render(&mut block);
 		TRACK.set(false);
@@ -51,6 +61,7 @@ fn streamed_frames_survive_underflow_without_callback_allocations() {
 			id: 7,
 			stream,
 			gain: 1.0,
+			onset: None,
 		})
 		.ok()
 		.unwrap();
