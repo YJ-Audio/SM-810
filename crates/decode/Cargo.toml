@@ -1,0 +1,16 @@
+[package]
+name = "sampler-decode"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+symphonia = { version = "0.6.1", features = ["aiff", "mp3"] }
+rubato = "5.0.1"
+audioadapter-buffers = "5.1"
+
+[dev-dependencies]
+tempfile.workspace = true
+hound = "3.5.1"

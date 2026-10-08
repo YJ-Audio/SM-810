@@ -1,0 +1,7 @@
+# Used only to regenerate synthetic test fixtures; not required by the application.
+transformers==4.57.3
+torch==2.14.1
+onnxruntime==1.30.0
+numpy==2.5.3
+soundfile==0.14.0
+onnx==1.23.2

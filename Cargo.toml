@@ -1,13 +1,51 @@
-[package]
-name = "SM-810"
+[workspace]
+members = ["crates/db", "crates/scan", "crates/engine", "crates/decode", "crates/analysis", "crates/audio", "crates/embed", "crates/similarity", "crates/layout", "src-tauri"]
+default-members = [".", "crates/db", "crates/scan", "crates/engine", "crates/decode", "crates/analysis", "crates/audio", "crates/embed", "crates/similarity", "crates/layout"]
+resolver = "3"
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
-authors = ["potistudio <potistudio@proton.me>"]
 license = "MIT"
 publish = false
+
+[workspace.dependencies]
+sampler-layout = { path = "crates/layout" }
+sampler-embed = { path = "crates/embed" }
+sampler-similarity = { path = "crates/similarity" }
+sampler-audio = { path = "crates/audio" }
+sampler-decode = { path = "crates/decode" }
+sampler-analysis = { path = "crates/analysis" }
+sampler-db = { path = "crates/db" }
+sampler-scan = { path = "crates/scan" }
+sampler-engine = { path = "crates/engine" }
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+rusqlite_migration = "2.6.0"
+thiserror = "2.0.21"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1"
+xxhash-rust = { version = "0.8.19", features = ["xxh3"] }
+tempfile = "3.27.0"
+
+[package]
+default-run = "sampler"
+name = "sampler"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+sampler-engine.workspace = true
+sampler-db.workspace = true
+anyhow = "1.0.104"
+clap = { version = "4.6.7", features = ["derive"] }
+serde_json.workspace = true
+directories = "6.0.0"
 
 [profile.release]
 codegen-units = 1
 lto = true
 
-[dependencies]
+[profile.dev]
+debug = 1

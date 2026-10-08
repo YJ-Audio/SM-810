@@ -1,0 +1,18 @@
+[package]
+name = "sampler-analysis"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+sampler-decode.workspace = true
+serde.workspace = true
+ebur128 = "0.1.10"
+regex = "1.13.1"
+rustfft = "6.4.1"
+
+[dev-dependencies]
+tempfile.workspace = true
+hound = "3.5.1"

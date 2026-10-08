@@ -1,0 +1,32 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Sampler",
+  "version": "0.1.0",
+  "identifier": "studio.poti.sampler",
+  "build": {
+    "beforeDevCommand": "npm run prepare-layout && npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run prepare-layout && npm run build",
+    "frontendDist": "../ui/dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Sampler",
+        "width": 1480,
+        "height": 960,
+        "minWidth": 1000,
+        "minHeight": 640,
+        "backgroundColor": "#101214",
+        "dragDropEnabled": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src ipc: http://ipc.localhost"
+    }
+  },
+  "bundle": {
+    "active": false,
+    "externalBin": ["binaries/sampler-layout"]
+  }
+}

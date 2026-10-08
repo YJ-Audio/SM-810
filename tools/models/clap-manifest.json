@@ -1,0 +1,38 @@
+{
+  "repository": "Xenova/clap-htsat-unfused",
+  "revision": "c28f2883575e590e04d3146ff0713c2448d691ba",
+  "assets": [
+    {
+      "path": "config.json",
+      "bytes": 699,
+      "sha256": "39c6d90fe29cf2cce650dd5c92c38a1e35b130d9ce0bb98585222ad687ad979b"
+    },
+    {
+      "path": "onnx/audio_model.onnx",
+      "bytes": 117528416,
+      "sha256": "a1c2b43c44f71e0fa841a4b86700886c199bf87699ea45632c4d831bc6c88957"
+    },
+    {
+      "path": "onnx/text_model.onnx",
+      "bytes": 501513769,
+      "sha256": "6df7c51f2d78e236a03f2b816e613d538c815639d13644fe7c2124f439da9648"
+    },
+    {
+      "path": "preprocessor_config.json",
+      "bytes": 541,
+      "sha256": "9739f58296aa6f9ac18008fd0150fb2649bc554985fbde86d0a4041c882ac753"
+    },
+    {
+      "path": "tokenizer.json",
+      "bytes": 2108774,
+      "sha256": "dc239041d98de27ffc3975473a1a23e3db4c937b23c138c38bbc66588bd247e5"
+    },
+    {
+      "path": "tokenizer_config.json",
+      "bytes": 1392,
+      "sha256": "2c964a338683aec3695ea37687271e75b40905233f5d2a5bbb9be8cb40c4d0a0"
+    }
+  ],
+  "license": "Apache-2.0",
+  "reference_revision": "8fa0f1c6d0433df6e97c127f64b2a1d6c0dcda8a"
+}

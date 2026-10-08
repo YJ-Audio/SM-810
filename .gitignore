@@ -6,3 +6,13 @@ target/
 
 # Personal references
 refs/
+
+# Frontend and Tauri generated artifacts
+ui/node_modules/
+ui/dist/
+src-tauri/gen/
+/tools/models/.venv/
+/tools/models/.cache/
+/tools/layout/.venv/
+/tools/layout/.cache/
+src-tauri/binaries/
