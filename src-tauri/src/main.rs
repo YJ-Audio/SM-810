@@ -98,6 +98,15 @@ fn audition(
 		.map_err(|e| e.to_string())
 }
 #[tauri::command]
+fn configure_link(state: State<'_, App>, enabled: bool, tempo: Option<f64>) -> Result<(), String> {
+	let guard = state.audio.lock().map_err(|e| e.to_string())?;
+	guard
+		.as_ref()
+		.ok_or("Audio unavailable")?
+		.configure_link(enabled, tempo)
+		.map_err(|e| e.to_string())
+}
+#[tauri::command]
 fn prefetch(state: State<'_, App>, ids: Vec<i64>, settings: Settings) -> Result<(), String> {
 	if let Some(audio) = state.audio.lock().map_err(|e| e.to_string())?.as_ref() {
 		audio.prefetch(ids, settings);
@@ -406,6 +415,7 @@ fn main() {
 			audition,
 			playback_status,
 			prefetch,
+			configure_link,
 			add_source,
 			rescan,
 			edit_tag,

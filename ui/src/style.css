@@ -1437,3 +1437,9 @@ dialog.wide-dialog {
   color: var(--muted);
   padding: 8px 2px;
 }
+
+.link-button.enabled {
+  background: var(--accent);
+  color: #16100c;
+  border-color: var(--accent);
+}

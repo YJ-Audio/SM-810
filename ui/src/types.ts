@@ -65,6 +65,10 @@ export type Wave = {
   bits_per_sample: number | null;
 };
 export type Playback = {
+  waiting?: boolean;
+  link_enabled?: boolean;
+  link_tempo?: number;
+  link_peers?: number;
   sample_id: number;
   seconds: number;
   playing: boolean;

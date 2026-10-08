@@ -36,6 +36,7 @@ fn callback_does_not_allocate_or_free_when_garbage_queue_fills() {
 			id,
 			buffer,
 			gain: 1.0,
+			quantize: false,
 			onset: Some(Onset {
 				token: id,
 				requested: Instant::now(),
@@ -62,6 +63,7 @@ fn streamed_frames_survive_underflow_without_callback_allocations() {
 			stream,
 			gain: 1.0,
 			onset: None,
+			quantize: false,
 		})
 		.ok()
 		.unwrap();
@@ -89,4 +91,32 @@ fn streamed_frames_survive_underflow_without_callback_allocations() {
 	drop(garbage.pop().unwrap());
 	assert_eq!(ALLOCS.get(), 0);
 	assert_eq!(FREES.get(), 0);
+}
+
+#[test]
+fn link_capture_and_waiting_launch_do_not_allocate_in_callback() {
+	let link = sampler_audio::link::LinkControl::new(120.0);
+	let (mut mixer, mut commands, _garbage, _position) = Mixer::new(48000, 2);
+	mixer.attach_link(&link);
+	link.configure(true, None).unwrap();
+	commands
+		.push(Command::Play {
+			id: 1,
+			buffer: Arc::new(Buffer {
+				samples: vec![0.2; 4096].into_boxed_slice(),
+				channels: 2,
+			}),
+			gain: 1.0,
+			onset: None,
+			quantize: true,
+		})
+		.ok()
+		.unwrap();
+	let mut output = [0.0f32; 512];
+	TRACK.set(true);
+	mixer.render(&mut output);
+	TRACK.set(false);
+	assert_eq!(ALLOCS.get(), 0);
+	assert_eq!(FREES.get(), 0);
+	link.configure(false, None).unwrap();
 }

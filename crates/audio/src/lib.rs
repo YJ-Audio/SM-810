@@ -1,4 +1,6 @@
+pub mod link;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use link::{LinkClock, LinkControl, launch_frame};
 use rtrb::{Consumer, Producer, RingBuffer};
 use std::{
 	sync::{
@@ -37,6 +39,7 @@ pub struct Position {
 	pub frame: AtomicU64,
 	pub playing: AtomicBool,
 	pub device_error: AtomicBool,
+	pub waiting: AtomicBool,
 	pub onset_token: AtomicU64,
 	pub onset_micros: AtomicU64,
 }
@@ -100,12 +103,14 @@ pub enum Command {
 		buffer: Arc<Buffer>,
 		gain: f32,
 		onset: Option<Onset>,
+		quantize: bool,
 	},
 	Stream {
 		id: u64,
 		stream: Box<StreamBuffer>,
 		gain: f32,
 		onset: Option<Onset>,
+		quantize: bool,
 	},
 	Stop,
 }
@@ -115,9 +120,20 @@ struct Voice {
 	frame: usize,
 	gain: f32,
 	onset: Option<Onset>,
+	quantize: bool,
+	bar: Option<f64>,
 }
 impl Voice {
+	fn ready(&self) -> bool {
+		match &self.source {
+			Source::Buffered(buffer) => self.frame < buffer.frames(),
+			Source::Streaming(stream) => stream.samples.slots() >= stream.frame.len(),
+		}
+	}
 	fn prepare_frame(&mut self) -> bool {
+		if self.quantize {
+			return false;
+		}
 		if let Source::Streaming(stream) = &mut self.source {
 			if stream.samples.slots() < stream.frame.len() {
 				stream.frame.fill(0.0);
@@ -163,6 +179,8 @@ impl Voice {
 }
 
 pub struct Mixer {
+	link: Option<LinkClock>,
+	rate: u32,
 	commands: Consumer<Command>,
 	retired: Producer<Source>,
 	current: Option<Voice>,
@@ -178,6 +196,8 @@ impl Mixer {
 		let (retired, garbage) = RingBuffer::new(128);
 		let position = Arc::new(Position::default());
 		let mixer = Self {
+			link: None,
+			rate: sample_rate,
 			commands: receiver,
 			retired,
 			current: None,
@@ -188,6 +208,9 @@ impl Mixer {
 			position: position.clone(),
 		};
 		(mixer, commands, garbage, position)
+	}
+	pub fn attach_link(&mut self, link: &LinkControl) {
+		self.link = Some(LinkClock::new(link));
 	}
 	fn accept_commands(&mut self) {
 		// Reserving retirement slots before popping ensures Arc destructors never run here.
@@ -206,24 +229,30 @@ impl Mixer {
 					buffer,
 					gain,
 					onset,
+					quantize,
 				} => Some(Voice {
 					id,
 					source: Source::Buffered(buffer),
 					frame: 0,
 					gain,
 					onset,
+					quantize,
+					bar: None,
 				}),
 				Command::Stream {
 					id,
 					stream,
 					gain,
 					onset,
+					quantize,
 				} => Some(Voice {
 					id,
 					source: Source::Streaming(stream),
 					frame: 0,
 					gain,
 					onset,
+					quantize,
+					bar: None,
 				}),
 				Command::Stop => None,
 			};
@@ -234,7 +263,42 @@ impl Mixer {
 	}
 	fn render_with_delay<T: cpal::Sample + cpal::FromSample<f32>>(&mut self, output: &mut [T], delivery: Duration) {
 		self.accept_commands();
-		for frame in output.chunks_mut(self.channels) {
+		let start_frame = if let Some(voice) = &mut self.current {
+			if voice.quantize {
+				match self
+					.link
+					.as_mut()
+					.and_then(|link| link.snapshot(delivery.as_micros().min(i64::MAX as u128) as i64))
+				{
+					None => Some(0),
+					Some(now) if voice.ready() => {
+						let link = self.link.as_ref().unwrap();
+						let bar = *voice.bar.get_or_insert_with(|| link.next_bar(now));
+						Some(launch_frame(link.time_at_beat(bar), now, self.rate))
+					}
+					Some(_) => None,
+				}
+			} else {
+				None
+			}
+		} else {
+			None
+		};
+		self.render_block(output, delivery, start_frame);
+	}
+	fn render_block<T: cpal::Sample + cpal::FromSample<f32>>(
+		&mut self,
+		output: &mut [T],
+		delivery: Duration,
+		start_frame: Option<usize>,
+	) {
+		for (frame_index, frame) in output.chunks_mut(self.channels).enumerate() {
+			if start_frame == Some(frame_index)
+				&& let Some(voice) = &mut self.current
+			{
+				voice.quantize = false;
+				self.fade = 0;
+			}
 			let current_ready = self.current.as_mut().is_some_and(Voice::prepare_frame);
 			if current_ready
 				&& let Some(voice) = &mut self.current
@@ -244,7 +308,8 @@ impl Mixer {
 				let micros = onset
 					.prior_micros
 					.saturating_add(onset.requested.elapsed().as_micros() as u64)
-					.saturating_add(delivery.as_micros() as u64);
+					.saturating_add(delivery.as_micros() as u64)
+					.saturating_add(frame_index as u64 * 1_000_000 / self.rate as u64);
 				self.position.onset_micros.store(micros, Ordering::Relaxed);
 				self.position.onset_token.store(onset.token, Ordering::Release);
 			}
@@ -252,14 +317,20 @@ impl Mixer {
 			let angle = (self.fade as f32 / self.fade_frames as f32).min(1.0) * std::f32::consts::FRAC_PI_2;
 			let (incoming, outgoing) = angle.sin_cos();
 			for (channel, value) in frame.iter_mut().enumerate() {
-				let a = self
-					.current
-					.as_ref()
-					.map_or(0.0, |voice| voice.sample(channel, self.channels) * incoming);
-				let b = self
-					.previous
-					.as_ref()
-					.map_or(0.0, |voice| voice.sample(channel, self.channels) * outgoing);
+				let a = self.current.as_ref().map_or(0.0, |voice| {
+					if current_ready {
+						voice.sample(channel, self.channels) * incoming
+					} else {
+						0.0
+					}
+				});
+				let b = self.previous.as_ref().map_or(0.0, |voice| {
+					if previous_ready {
+						voice.sample(channel, self.channels) * outgoing
+					} else {
+						0.0
+					}
+				});
 				*value = T::from_sample((a + b).clamp(-1.0, 1.0));
 			}
 			if current_ready && let Some(voice) = &mut self.current {
@@ -286,13 +357,16 @@ impl Mixer {
 				Ordering::Relaxed,
 			);
 			self.position.playing.store(!voice.finished(), Ordering::Release);
+			self.position.waiting.store(voice.quantize, Ordering::Release);
 		} else {
 			self.position.playing.store(false, Ordering::Release);
+			self.position.waiting.store(false, Ordering::Release);
 		}
 	}
 }
 
 pub struct Output {
+	pub link: Arc<LinkControl>,
 	pub sample_rate: u32,
 	pub position: Arc<Position>,
 	commands: Producer<Command>,
@@ -301,6 +375,8 @@ pub struct Output {
 }
 impl Output {
 	pub fn open() -> Result<Self, Error> {
+		let link = LinkControl::new(124.0);
+		let audio_link = link.clone();
 		let (ready, wait) = mpsc::sync_channel(1);
 		let (shutdown, exit) = mpsc::channel();
 		let thread = thread::Builder::new()
@@ -315,7 +391,8 @@ impl Output {
 						.map_err(|e| Error::Device(e.to_string()))?;
 					let rate = supported.sample_rate();
 					let channels = supported.channels() as usize;
-					let (mixer, commands, garbage, position) = Mixer::new(rate, channels);
+					let (mut mixer, commands, garbage, position) = Mixer::new(rate, channels);
+					mixer.attach_link(&audio_link);
 					let config: cpal::StreamConfig = supported.into();
 					let stream = match supported.sample_format() {
 						cpal::SampleFormat::F32 => stream::<f32>(&device, config, mixer, position.clone()),
@@ -352,6 +429,7 @@ impl Output {
 			.map_err(|e| Error::Device(e.to_string()))?;
 		let (sample_rate, commands, position) = wait.recv().map_err(|e| Error::Device(e.to_string()))??;
 		Ok(Self {
+			link,
 			sample_rate,
 			position,
 			commands,
@@ -360,7 +438,7 @@ impl Output {
 		})
 	}
 	pub fn play(&mut self, id: u64, buffer: Arc<Buffer>, gain: f32) -> Result<(), Error> {
-		self.play_measured(id, buffer, gain, None)
+		self.play_measured(id, buffer, gain, None, false)
 	}
 	pub fn play_measured(
 		&mut self,
@@ -368,6 +446,7 @@ impl Output {
 		buffer: Arc<Buffer>,
 		gain: f32,
 		onset: Option<Onset>,
+		quantize: bool,
 	) -> Result<(), Error> {
 		if buffer.channels == 0 || buffer.frames() == 0 || !gain.is_finite() || gain < 0.0 {
 			return Err(Error::InvalidBuffer);
@@ -378,11 +457,12 @@ impl Output {
 				buffer,
 				gain,
 				onset,
+				quantize,
 			})
 			.map_err(|_| Error::QueueFull)
 	}
 	pub fn stream(&mut self, id: u64, stream: Box<StreamBuffer>, gain: f32) -> Result<(), Error> {
-		self.stream_measured(id, stream, gain, None)
+		self.stream_measured(id, stream, gain, None, false)
 	}
 	pub fn stream_measured(
 		&mut self,
@@ -390,6 +470,7 @@ impl Output {
 		stream: Box<StreamBuffer>,
 		gain: f32,
 		onset: Option<Onset>,
+		quantize: bool,
 	) -> Result<(), Error> {
 		if !gain.is_finite() || gain < 0.0 {
 			return Err(Error::InvalidBuffer);
@@ -400,6 +481,7 @@ impl Output {
 				stream,
 				gain,
 				onset,
+				quantize,
 			})
 			.map_err(|_| Error::QueueFull)
 	}
@@ -449,6 +531,55 @@ pub fn matched_gain(lufs: Option<f64>, peak_dbfs: Option<f64>, target: f64) -> f
 mod tests {
 	use super::*;
 	#[test]
+	fn queued_launch_keeps_pcm_until_boundary_and_stop_cancels_waiting_voice() {
+		let (mut mixer, mut commands, _garbage, position) = Mixer::new(48000, 1);
+		commands
+			.push(Command::Play {
+				id: 1,
+				buffer: Arc::new(Buffer {
+					samples: vec![0.5; 1000].into_boxed_slice(),
+					channels: 1,
+				}),
+				gain: 1.0,
+				onset: None,
+				quantize: true,
+			})
+			.ok()
+			.unwrap();
+		mixer.accept_commands();
+		let mut block = [0.0f32; 480];
+		mixer.render_block(&mut block, Duration::ZERO, None);
+		assert!(block.iter().all(|s| *s == 0.0));
+		assert_eq!(position.frame.load(Ordering::Relaxed), 0);
+		assert!(position.waiting.load(Ordering::Acquire));
+		mixer.render_block(&mut block, Duration::ZERO, Some(240));
+		assert!(block[..241].iter().all(|s| *s == 0.0));
+		assert!(block[479] > 0.49);
+		assert_eq!(position.frame.load(Ordering::Relaxed), 240);
+		assert!(!position.waiting.load(Ordering::Acquire));
+		// A queued stream must not consume frames before its bar either.
+		let (mut writer, stream) = StreamBuffer::bounded(1, 1000).unwrap();
+		writer.write(&[0.2; 1000]);
+		commands
+			.push(Command::Stream {
+				id: 2,
+				stream,
+				gain: 1.0,
+				onset: None,
+				quantize: true,
+			})
+			.ok()
+			.unwrap();
+		mixer.accept_commands();
+		mixer.render_block(&mut block, Duration::ZERO, None);
+		assert_eq!(position.frame.load(Ordering::Relaxed), 0);
+		commands.push(Command::Stop).ok().unwrap();
+		mixer.accept_commands();
+		mixer.render_block(&mut block, Duration::ZERO, None);
+		assert!(block.iter().all(|s| *s == 0.0));
+		assert!(!position.playing.load(Ordering::Acquire));
+	}
+	#[test]
 	fn crossfade_is_continuous_and_retirement_is_deferred() {
 		let (mut mixer, mut commands, mut garbage, position) = Mixer::new(48000, 1);
 		let first = Arc::new(Buffer {
@@ -461,6 +592,7 @@ mod tests {
 				buffer: first.clone(),
 				gain: 1.0,
 				onset: None,
+				quantize: false,
 			})
 			.ok()
 			.unwrap();
@@ -477,6 +609,7 @@ mod tests {
 				}),
 				gain: 1.0,
 				onset: None,
+				quantize: false,
 			})
 			.ok()
 			.unwrap();
@@ -513,6 +646,7 @@ mod tests {
 					buffer,
 					gain: 1.0,
 					onset: None,
+					quantize: false,
 				})
 				.ok()
 				.unwrap();

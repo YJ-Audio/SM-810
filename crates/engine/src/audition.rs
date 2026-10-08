@@ -41,6 +41,10 @@ pub struct Status {
 	pub seconds: f64,
 	pub playing: bool,
 	pub error: Option<String>,
+	pub waiting: bool,
+	pub link_enabled: bool,
+	pub link_tempo: f64,
+	pub link_peers: u64,
 	pub onset_token: u64,
 	pub onset_micros: u64,
 }
@@ -55,11 +59,13 @@ pub struct Auditioner {
 	output: Arc<Mutex<Output>>,
 	last_probe: AtomicU64,
 	trace_latency: bool,
+	link: Arc<sampler_audio::link::LinkControl>,
 }
 impl Auditioner {
 	pub fn open(engine: Arc<Engine>) -> Result<Self> {
 		let output = Output::open()?;
 		let rate = output.sample_rate;
+		let link = output.link.clone();
 		let position = output.position.clone();
 		let output = Arc::new(Mutex::new(output));
 		let device = output.clone();
@@ -98,6 +104,7 @@ impl Auditioner {
 							return Ok(());
 						}
 						let analysis = engine.analysis(id)?;
+						let quantize = analysis.as_ref().is_some_and(|a| a.is_loop == Some(true));
 						let gain = if request.settings.match_lufs {
 							matched_gain(
 								analysis.as_ref().and_then(|a| a.lufs),
@@ -112,7 +119,7 @@ impl Auditioner {
 								.lock()
 								.map_err(|_| Error::Invalid("Audio control lock poisoned".into()))?;
 							if current.load(Ordering::Acquire) == request.revision {
-								output.play_measured(id as u64, buffer.clone(), gain, request.onset)?;
+								output.play_measured(id as u64, buffer.clone(), gain, request.onset, quantize)?;
 							}
 							return Ok(());
 						}
@@ -131,7 +138,7 @@ impl Auditioner {
 							if current.load(Ordering::Acquire) != request.revision {
 								return Ok(());
 							}
-							output.stream_measured(id as u64, stream, gain, request.onset)?;
+							output.stream_measured(id as u64, stream, gain, request.onset, quantize)?;
 							writer = Some(producer);
 						}
 						sampler_decode::stream(&engine.file_path(id)?, rate, request.settings.semitones, |packet| {
@@ -166,7 +173,7 @@ impl Auditioner {
 									if current.load(Ordering::Acquire) != request.revision {
 										return Ok(false);
 									}
-									output.stream_measured(id as u64, stream, gain, request.onset)?;
+									output.stream_measured(id as u64, stream, gain, request.onset, quantize)?;
 									drop(output);
 									writer = Some(producer);
 									return Ok(write_stream(
@@ -233,6 +240,7 @@ impl Auditioner {
 			output,
 			last_probe: AtomicU64::new(0),
 			trace_latency: std::env::var_os("SAMPLER_TRACE_LATENCY").is_some(),
+			link,
 		})
 	}
 	pub fn play(&self, id: Option<i64>, settings: Settings) -> Result<()> {
@@ -297,7 +305,12 @@ impl Auditioner {
 			}
 		}
 	}
+	pub fn configure_link(&self, enabled: bool, tempo: Option<f64>) -> Result<()> {
+		self.link.configure(enabled, tempo)?;
+		Ok(())
+	}
 	pub fn status(&self) -> Status {
+		let link = self.link.status();
 		let onset_token = self.position.onset_token.load(Ordering::Acquire);
 		let onset_micros = self.position.onset_micros.load(Ordering::Relaxed);
 		if self.trace_latency && onset_token > 0 && self.last_probe.swap(onset_token, Ordering::Relaxed) != onset_token
@@ -310,6 +323,10 @@ impl Auditioner {
 			self.error.lock().ok().and_then(|error| error.clone())
 		};
 		Status {
+			waiting: self.position.waiting.load(Ordering::Acquire),
+			link_enabled: link.enabled,
+			link_tempo: link.tempo,
+			link_peers: link.peers,
 			sample_id: self.position.sample_id.load(Ordering::Relaxed),
 			seconds: self.position.frame.load(Ordering::Relaxed) as f64 / self.rate as f64,
 			playing: self.position.playing.load(Ordering::Acquire),

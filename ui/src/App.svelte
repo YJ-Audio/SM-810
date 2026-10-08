@@ -80,6 +80,7 @@
     playing: false,
     error: null,
   });
+  let linkTempo = $state(124);
   let matchLufs = $state(true),
     semitones = $state(0),
     targetLufs = $state(-16),
@@ -817,7 +818,16 @@
       );
     void prepareSlice(!event.altKey);
   }
-  function saveSettings() {
+  async function saveSettings() {
+    try {
+      await invoke('configure_link', {
+        enabled: !!playback.link_enabled,
+        tempo: linkTempo,
+      });
+    } catch (e) {
+      fail(e);
+      return;
+    }
     localStorage.setItem('sampler-audition', JSON.stringify(settings()));
     dialog.close();
   }
@@ -952,9 +962,16 @@
     </div>
     <button
       class="link-button"
-      disabled
-      title="Tempo synchronization is not available yet"
-      ><Icon name="link" size={15} />Link <span>—</span></button
+      class:enabled={playback.link_enabled}
+      aria-pressed={!!playback.link_enabled}
+      title={`${playback.link_peers ?? 0} peers · align loop starts to a 4-beat bar`}
+      onclick={() =>
+        invoke('configure_link', {
+          enabled: !playback.link_enabled,
+          tempo: null,
+        }).catch(fail)}
+      ><Icon name="link" size={15} />Link
+      <span>{(playback.link_tempo ?? 124).toFixed(2)}</span></button
     >
     <button
       class="match-button"
@@ -977,6 +994,7 @@
       class="icon-button settings"
       aria-label="Audition settings"
       onclick={() => {
+        linkTempo = playback.link_tempo ?? 124;
         dialogMode = 'settings';
         dialog.showModal();
       }}><Icon name="settings" /></button
@@ -1470,7 +1488,8 @@
         <i class="dot" style:background={selectedKind?.color}></i><span
           >{selectedKind?.name.toUpperCase()}</span
         >{#if playback.playing && playback.sample_id === selected.id}<span
-            class="playing-badge">Playing</span
+            class="playing-badge"
+            >{playback.waiting ? 'Waiting for bar' : 'Playing'}</span
           >{/if}
       </div>
       <h1>{selected.name}</h1>
@@ -1663,10 +1682,23 @@
   {:else}<form
       onsubmit={(e) => {
         e.preventDefault();
-        saveSettings();
+        void saveSettings();
       }}
     >
       <p>Match preview loudness while keeping peak headroom.</p>
+      <label for="link-tempo">Link tempo (BPM)</label><input
+        id="link-tempo"
+        type="number"
+        min="20"
+        max="999"
+        step="0.01"
+        bind:value={linkTempo}
+        required
+      />
+      <p class="muted">
+        {playback.link_peers ?? 0} connected peers. Link aligns loop starts to a 4-beat
+        bar. Playback keeps its original tempo.
+      </p>
       <label for="target-lufs">Target loudness (LUFS)</label><input
         id="target-lufs"
         type="number"

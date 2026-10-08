@@ -50,3 +50,12 @@
 - 大きなホイール差分・行単位スクロール・Ctrlピンチはズーム、小さなピクセル単位差分はパン — WebViewからホイールとトラックパッドの種類を確実には判別できないための暫定判定。
 - 遅延計測は点ヒット時刻から最初のPCMフレームのCPAL再生予定時刻まで — コールバック中は1音につき単調時計を1回読むだけにし、記録と表示は別スレッドで行う。DAC以降の物理出力・聴感は未検証として分ける。
 - 開発ビルドのdebug情報を1へ抑える — 依存の全debug情報で13GiBを超え、この環境の空き容量を圧迫した。行情報は残し、release構成は変更しない。
+
+## 整理とLink
+
+- ルールの再適用はrule_id付きの付与だけ置換し、手動タグのNULLを優先する。重複ルールの残りは再適用で復元し、FTSも同じwriterトランザクションで更新する。
+- 静的コレクションは追加順と隣接位置の交換で順序を保つ。スマートコレクションとMapは同じQueryを評価する。コレクション参照は動的に解決し、間接的な自己参照も保存前に拒否する。
+- rusty_link 0.4.9を使用する。コントロール側のSessionStateはMutexで保護し、音声側は別のSessionStateをコールバック外で確保する。音声側はcaptureのみを行い、テンポ編集はコントロール側からcommitする。
+- 解析上のループだけ4拍の小節頭を待つ。CPALのplayback−callback時間をLink時計へ加え、毎コールバックでtempo変更に追従して開始フレームを求める。待機中はPCMを消費せず、開始時に5msフェードインする。Stop、新選択、Linkオフで待機を解除できる。
+- [AbletonのLink資料](https://ableton.github.io/link/)に従い出力遅延を考慮する。ホスト時計とドライバが示す再生予定時刻の対応を使うため、物理ループバックでの位相精度は未検証。
+- テンポ伸縮の候補比較: [Rubber Band](https://breakfastquay.com/rubberband/)はC++、GPL／商用ライセンス、[Signalsmith Stretch](https://signalsmith-audio.com/code/stretch/)はC++ヘッダのMITライセンス。どちらもRustからFFIが必要で、CPU・遅延・ドラムのトランジェントの実測と作者選択は残る。現段階はSPECどおり開始同期まで。rusty_link自体はGPL-2.0-or-later（crate manifest）で、配布条件の決定は対象外の配布工程へ残す。
