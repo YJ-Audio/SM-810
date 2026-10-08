@@ -19,6 +19,8 @@ struct App {
 	audio: Mutex<Option<Auditioner>>,
 	audio_error: Option<String>,
 	analyzing: Arc<AtomicBool>,
+	caching: Arc<AtomicBool>,
+	pause_caching: Arc<AtomicBool>,
 	embedding: Arc<AtomicBool>,
 	pause_embedding: Arc<AtomicBool>,
 	downloading: Arc<AtomicBool>,
@@ -44,6 +46,7 @@ async fn bootstrap(state: State<'_, App>) -> Reply {
 	let engine = state.engine.clone();
 	let audio_error = state.audio_error.clone();
 	let analyzing = state.analyzing.load(Ordering::Acquire);
+	let caching = state.caching.load(Ordering::Acquire);
 	let embedding = state.embedding.load(Ordering::Acquire);
 	let downloading = state.downloading.load(Ordering::Acquire);
 	let download_bytes = state.download_bytes.load(Ordering::Relaxed);
@@ -58,7 +61,7 @@ async fn bootstrap(state: State<'_, App>) -> Reply {
 			"tags": engine.tags().map_err(|e| e.to_string())?,
 			"jobs": engine.jobs().map_err(|e| e.to_string())?,
 			"audio_error": audio_error,
-			"analyzing": analyzing,
+			"analyzing": analyzing, "caching": caching,
 			"embedding": embedding, "model_ready": engine.model_ready(), "embedded": engine.embedding_count(),
 			"downloading": downloading, "download_bytes": download_bytes, "download_total": download_total,
 		}))
@@ -120,6 +123,31 @@ fn playback_status(state: State<'_, App>) -> Reply {
 		.as_ref()
 		.map(|audio| json!(audio.status()))
 		.unwrap_or_else(|| json!({"playing":false,"sample_id":0,"seconds":0,"error":state.audio_error})))
+}
+#[tauri::command]
+async fn retry_preview_failures(state: State<'_, App>) -> Reply {
+	let engine = state.engine.clone();
+	work(move || json_result(engine.retry_preview_failures())).await
+}
+#[tauri::command]
+fn pause_caching(state: State<'_, App>) {
+	state.pause_caching.store(true, Ordering::Release);
+}
+#[tauri::command]
+fn start_caching(app: tauri::AppHandle, state: State<'_, App>) -> Result<(), String> {
+	if state.caching.swap(true, Ordering::AcqRel) {
+		return Ok(());
+	}
+	state.pause_caching.store(false, Ordering::Release);
+	let engine = state.engine.clone();
+	let active = state.caching.clone();
+	let pause = state.pause_caching.clone();
+	std::thread::spawn(move || {
+		let result = engine.cache_previews(usize::MAX, || pause.load(Ordering::Acquire));
+		active.store(false, Ordering::Release);
+		let _ = app.emit("library-updated", result.err().map(|e| e.to_string()));
+	});
+	Ok(())
 }
 #[tauri::command]
 async fn add_source(state: State<'_, App>, path: PathBuf, label: String, storage: sampler_db::Storage) -> Reply {
@@ -378,6 +406,8 @@ fn main() {
 				audio: Mutex::new(audio),
 				audio_error,
 				analyzing: Arc::new(AtomicBool::new(false)),
+				caching: Arc::new(AtomicBool::new(false)),
+				pause_caching: Arc::new(AtomicBool::new(false)),
 				embedding: Arc::new(AtomicBool::new(false)),
 				pause_embedding: Arc::new(AtomicBool::new(false)),
 				downloading: Arc::new(AtomicBool::new(false)),
@@ -399,6 +429,7 @@ fn main() {
 					std::thread::sleep(Duration::from_secs(2));
 					let state = handle.state::<App>();
 					if state.analyzing.load(Ordering::Acquire)
+						|| state.caching.load(Ordering::Acquire)
 						|| state.embedding.load(Ordering::Acquire)
 						|| state.downloading.load(Ordering::Acquire)
 					{
@@ -423,6 +454,9 @@ fn main() {
 			snap_slice,
 			prepare_drag,
 			start_analysis,
+			start_caching,
+			pause_caching,
+			retry_preview_failures,
 			similar,
 			start_embedding,
 			pause_embedding,
@@ -447,6 +481,7 @@ fn main() {
 			if matches!(event, tauri::RunEvent::ExitRequested { .. }) {
 				let state = app.state::<App>();
 				state.layout_cancel.store(true, Ordering::Release);
+				state.pause_caching.store(true, Ordering::Release);
 				// Reap the sidecar before the process exits so cancelled work cannot remain orphaned.
 				for _ in 0..100 {
 					if state.layout_active.load(Ordering::Acquire) == 0 {

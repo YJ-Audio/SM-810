@@ -99,7 +99,28 @@ impl Auditioner {
 						}
 						let id = request.id;
 						let key = (id, request.settings.semitones);
-						let cached = cache.get(key);
+						let cached = cache.get(key).or_else(|| {
+							let preview = engine.preview(id).ok().flatten()?;
+							let mut converted = sampler_decode::convert_head(
+								preview.audio,
+								rate,
+								request.settings.semitones,
+								preview.complete,
+							)
+							.ok()?;
+							if !preview.complete {
+								converted.samples.truncate(rate as usize * converted.channels);
+							}
+							if converted.samples.is_empty() {
+								return None;
+							}
+							let buffer = Arc::new(Buffer {
+								samples: converted.samples.into_boxed_slice(),
+								channels: converted.channels,
+							});
+							cache.insert(key, buffer.clone(), preview.complete);
+							Some((buffer, preview.complete))
+						});
 						if request.prefetch && cached.is_some() {
 							return Ok(());
 						}

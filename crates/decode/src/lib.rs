@@ -209,6 +209,33 @@ pub fn stream(path: &Path, rate: u32, semitones: i8, mut emit: impl FnMut(Audio)
 	Ok(())
 }
 
+/// Converts cached native PCM using the streaming filter. An incomplete head is not flushed:
+/// only frames whose filter context exists are emitted, so the original stream can resume at the same index.
+pub fn convert_head(mut audio: Audio, rate: u32, semitones: i8, complete: bool) -> Result<Audio, Error> {
+	if rate == 0 || !(-24..=24).contains(&semitones) {
+		return Err(Error::Invalid("Invalid playback rate".into()));
+	}
+	audio.sample_rate = (audio.sample_rate as f64 * 2.0f64.powf(semitones as f64 / 12.0)).round() as u32;
+	if audio.sample_rate == rate {
+		return Ok(audio);
+	}
+	let mut converter = BlockResampler::new(&audio, rate)?;
+	let mut samples = Vec::new();
+	let mut emit = |block: Audio| {
+		samples.extend(block.samples);
+		true
+	};
+	converter.push(&audio.samples, &mut emit)?;
+	if complete {
+		converter.finish(&mut emit)?;
+	}
+	Ok(Audio {
+		samples,
+		sample_rate: rate,
+		..audio
+	})
+}
+
 struct BlockResampler {
 	filter: Fft<f32>,
 	metadata: Audio,
@@ -367,6 +394,17 @@ mod tests {
 			assert!(blocks > 1);
 			assert_eq!(output.len(), expected.samples.len());
 			assert!(output.iter().zip(&expected.samples).all(|(a, b)| (a - b).abs() < 1e-5));
+			let head = decode_head(&path, Some(1.0)).unwrap();
+			let converted = convert_head(head, rate, pitch, false).unwrap();
+			assert!(!converted.samples.is_empty());
+			assert!(converted.samples.len() < output.len());
+			assert!(
+				converted.samples.iter().zip(&output).all(|(a, b)| (a - b).abs() < 1e-5),
+				"Cached prefix differs at rate {rate}, pitch {pitch}"
+			);
+			let complete = convert_head(decode(&path).unwrap(), rate, pitch, true).unwrap();
+			assert_eq!(complete.samples.len(), output.len());
+			assert!(complete.samples.iter().zip(&output).all(|(a, b)| (a - b).abs() < 1e-5));
 		}
 		let mut calls = 0;
 		stream(&path, 48000, 0, |block| {

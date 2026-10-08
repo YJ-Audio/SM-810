@@ -24,6 +24,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 const MIGRATION_STEPS: &[M<'static>] = &[
 	M::up(include_str!("../migrations/001_initial.sql")),
 	M::up(include_str!("../migrations/002_scan_state.sql")),
+	M::up(include_str!("../migrations/003_preview_complete.sql")),
 ];
 const MIGRATIONS: Migrations<'static> = Migrations::from_slice(MIGRATION_STEPS);
 

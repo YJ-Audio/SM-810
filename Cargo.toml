@@ -28,6 +28,7 @@ xxhash-rust = { version = "0.8.19", features = ["xxh3"] }
 tempfile = "3.27.0"
 
 [package]
+default-run = "sampler"
 name = "sampler"
 version.workspace = true
 edition.workspace = true

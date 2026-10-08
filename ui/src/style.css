@@ -1443,3 +1443,12 @@ dialog.wide-dialog {
   color: #16100c;
   border-color: var(--accent);
 }
+
+.preview-settings {
+  margin: 20px 0;
+  padding: 16px 0;
+  border-block: 1px solid #30343a;
+}
+.preview-settings p {
+  margin: 10px 0;
+}

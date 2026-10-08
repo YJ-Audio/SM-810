@@ -57,6 +57,8 @@ pub struct Engine {
 	embedding_lock: Mutex<()>,
 	map_lock: Mutex<()>,
 	organize_lock: Mutex<()>,
+	preview_lock: Mutex<()>,
+	preview_map: Mutex<Option<memmap2::Mmap>>,
 	_process_lock: File,
 	path: PathBuf,
 	sender: Option<SyncSender<Request>>,
@@ -127,6 +129,8 @@ impl Engine {
 			embedding_lock: Mutex::new(()),
 			map_lock: Mutex::new(()),
 			organize_lock: Mutex::new(()),
+			preview_lock: Mutex::new(()),
+			preview_map: Mutex::new(None),
 			_process_lock: process_lock,
 			path,
 			sender: Some(sender),
@@ -392,3 +396,5 @@ mod embedding;
 pub mod query;
 
 pub mod maps;
+
+pub mod preview;

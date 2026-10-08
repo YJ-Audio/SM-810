@@ -4,11 +4,11 @@ DTM 用サンプルマネージャー。仕様は [SPEC.md](SPEC.md)、現在の
 
 現在は Tauri 2 + Svelte 5 のデスクトップ版 Map／List UI を起動できます。提供画像を基準に、ダーク配色のソース／タグ、仮想リスト、インスペクタ、波形トランスポートを実装しています。表示・検索・試聴には SQLite 内の実データを使います。
 
-CLAPによる類似上位5件・自然文検索を実装しています。WebGL2マップとなぞり試聴、Rust UMAPサイドカーによる再計算を実装しています。ファイル名／パスのタグルール、手動順の静的コレクション、共通条件式のスマートコレクションを実装しています。Ableton Linkによるループ開始の小節頭同期を実装しています。ディスク上の先頭キャッシュは実装中です。マイルストーン3のDAWドロップ・聴感の実機受け入れは未検証で、Windows環境はユーザー確認により利用できません。
+CLAPによる類似上位5件・自然文検索を実装しています。WebGL2マップとなぞり試聴、Rust UMAPサイドカーによる再計算を実装しています。ファイル名／パスのタグルール、手動順の静的コレクション、共通条件式のスマートコレクションを実装しています。Ableton Linkによるループ開始の小節頭同期を実装しています。外付け／ネットワーク／圧縮音声の先頭i16 PCMキャッシュを実装しています。マイルストーン3のDAWドロップ・聴感の実機受け入れは未検証で、Windows環境はユーザー確認により利用できません。
 
 ## デスクトップの起動
 
-Node.js 22.12 以上、npm 11、Rust（固定ツールチェーン）、各 OS の Tauri 開発環境が必要です。
+Node.js 22.12 以上、npm 11、Rust（固定ツールチェーン）、各 OS の Tauri 開発環境、CMake、libclang（rusty_linkのC++ビルド／バインディング生成）が必要です。
 
 ```sh
 npx --yes npm@11 --prefix ui ci
@@ -31,6 +31,9 @@ npm --prefix ui run tauri -- build --debug --bundles app
 - Mapでは左ボタンを押してなぞると試聴し、離した最後の音を選択します。Shift+ドラッグは投げ縄、右／中ドラッグと2本指スクロールはパン、ホイール／ピンチはズームです。Fit viewで全点に表示範囲を合わせます。
 - MapのRecompute layoutは明示したときだけ全体を再計算します。キャンセル中も既存配置で操作でき、追加点は既存8近傍の周辺へ置きます。カテゴリの「+」で現在の条件から新しいマップを作れます。
 - Shift+クリックで範囲選択し、Tag selection でまとめてタグを付けられます。解析済みの BPM／キーはインスペクタで修正できます。
+- TagsのTag rulesでファイル名／パスの正規表現を登録できます。再適用しても手動タグを保持します。Collectionsの「+」で選択音の保存、または条件で更新されるスマートコレクションを作成できます。選択バーの+ Collectionから追加し、静的コレクションでは↑↓で順序を変更します。
+- Linkをオンにすると、解析上のループを次の4拍の小節頭から試聴します。テンポは設定で変更できます。再生中のタイムストレッチは行いません。
+- 設定のFast previewsで対象音声の先頭1秒をローカルのpreview.packへキャッシュできます。Pause・再起動から再開でき、失敗だけ再試行できます。追加時のStorage指定が対象を決めます。
 - Match LUFS、目標 LUFS、±24 半音の移調に対応します。波形は元ファイルの時間軸を表示します。
 - 行または下部波形のドラッグで元ファイルを渡します。両端ハンドルで範囲を調整し、Drag slice から永続 WAV を渡します。初期の全範囲は Prepare slice を押すと書き出せます。
 - オーディオデバイス切断時はエラーを表示します。再接続後はアプリを再起動してください。
@@ -65,6 +68,7 @@ cargo run --release -- search kick --limit 25
 cargo run --release -- tag 1 'Drums/kick'
 cargo run --release -- verify
 cargo run --release -- analyze
+cargo run --release -- cache-previews
 cargo run --release -- download-model
 cargo run --release -- embed --limit 100
 cargo run --release -- similar 1

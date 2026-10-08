@@ -22,6 +22,10 @@ enum Storage {
 }
 #[derive(Subcommand)]
 enum Command {
+	CachePreviews {
+		#[arg(long,default_value_t=usize::MAX)]
+		limit: usize,
+	},
 	DownloadModel,
 	Embed {
 		#[arg(long,default_value_t=usize::MAX)]
@@ -97,6 +101,14 @@ fn main() -> Result<()> {
 	})?;
 	let engine = Engine::open(&path)?;
 	match cli.command {
+		Command::CachePreviews { limit } => {
+			let start = Instant::now();
+			let count = engine.cache_previews(limit, || false)?;
+			println!(
+				"Processed {count} preview cache jobs in {:.3}s",
+				start.elapsed().as_secs_f64()
+			);
+		}
 		Command::DownloadModel => {
 			engine.download_model(|done, total| {
 				if done == total {

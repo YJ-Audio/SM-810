@@ -50,6 +50,7 @@ export type Bootstrap = {
   jobs: Job[];
   audio_error: string | null;
   analyzing: boolean;
+  caching: boolean;
   embedding: boolean;
   embedded: number;
   model_ready: boolean;

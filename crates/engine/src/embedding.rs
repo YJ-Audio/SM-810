@@ -135,7 +135,7 @@ impl Engine {
 			self.write(move |tx| {
 				let id = tx
 					.query_row(
-						"SELECT sample_id FROM jobs WHERE kind='embed' AND state='pending' ORDER BY priority DESC,sample_id LIMIT 1",
+						"SELECT sample_id FROM jobs WHERE kind IN ('embed','preview_cache') AND state='pending' ORDER BY priority DESC,sample_id LIMIT 1",
 						[],
 						|r| r.get::<_, i64>(0),
 					)
@@ -171,7 +171,7 @@ impl Engine {
 		self.write(move |tx| {
 			for id in ids.into_iter().take(180) {
 				tx.execute(
-					"UPDATE jobs SET priority=10 WHERE sample_id=?1 AND kind='embed' AND state='pending'",
+					"UPDATE jobs SET priority=10 WHERE sample_id=?1 AND kind IN ('embed','preview_cache') AND state='pending'",
 					[id],
 				)?;
 			}

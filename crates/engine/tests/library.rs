@@ -691,3 +691,61 @@ fn collections_share_queries_keep_manual_order_and_persist() {
 	assert_eq!(engine.browse(request()).unwrap().total, 1);
 	assert!(source.join("alpha.wav").exists());
 }
+
+#[test]
+fn preview_pack_is_persistent_append_only_and_available_without_source_io() {
+	let dir = tempfile::tempdir().unwrap();
+	let source = dir.path().join("sounds");
+	fs::create_dir(&source).unwrap();
+	for (name, frames) in [("a-short", 12000), ("b-exact", 48000), ("c-long", 110000)] {
+		let mut file = hound::WavWriter::create(
+			source.join(format!("{name}.wav")),
+			hound::WavSpec {
+				channels: 2,
+				sample_rate: 48000,
+				bits_per_sample: 16,
+				sample_format: hound::SampleFormat::Int,
+			},
+		)
+		.unwrap();
+		for i in 0..frames {
+			file.write_sample((i % 20000) as i16).unwrap();
+			file.write_sample(-((i % 13000) as i16)).unwrap();
+		}
+		file.finalize().unwrap();
+	}
+	let original = fs::read(source.join("a-short.wav")).unwrap();
+	let path = dir.path().join("library.db");
+	let engine = Engine::open(&path).unwrap();
+	let root = engine.add_root(&source, "Network test", Storage::Network).unwrap();
+	engine.scan(root).unwrap();
+	let short = engine.search("a-short", 1, 0).unwrap()[0].id;
+	let exact = engine.search("b-exact", 1, 0).unwrap()[0].id;
+	let long = engine.search("c-long", 1, 0).unwrap()[0].id;
+	assert_eq!(engine.cache_previews(3, || true).unwrap(), 0);
+	assert_eq!(engine.cache_previews(1, || false).unwrap(), 1);
+	let first = fs::read(dir.path().join("preview.pack")).unwrap();
+	let cached = engine.preview(short).unwrap().unwrap();
+	assert!(cached.complete);
+	assert_eq!(cached.audio.frames(), 12000);
+	let decoded = sampler_decode::decode(&source.join("a-short.wav")).unwrap();
+	assert_eq!(cached.audio.samples, decoded.samples);
+	assert_eq!(engine.cache_previews(10, || false).unwrap(), 2);
+	assert!(fs::read(dir.path().join("preview.pack")).unwrap().starts_with(&first));
+	assert!(engine.preview(exact).unwrap().unwrap().complete);
+	let head = engine.preview(long).unwrap().unwrap();
+	assert!(!head.complete);
+	assert_eq!(head.audio.frames(), 48000);
+	assert_eq!(fs::read(source.join("a-short.wav")).unwrap(), original);
+	drop(engine);
+	let engine = Engine::open(&path).unwrap();
+	assert_eq!(engine.cache_previews(10, || false).unwrap(), 0);
+	fs::rename(&source, dir.path().join("disconnected")).unwrap();
+	assert_eq!(engine.preview(short).unwrap().unwrap().audio.samples, decoded.samples);
+	assert!(engine.file_path(short).is_err());
+	drop(engine);
+	// Simulate a missing/truncated pack before mapping; never truncate a live mmap.
+	fs::write(dir.path().join("preview.pack"), []).unwrap();
+	let engine = Engine::open(&path).unwrap();
+	assert!(engine.preview(long).is_err());
+}

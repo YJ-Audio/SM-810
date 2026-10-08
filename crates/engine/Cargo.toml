@@ -19,4 +19,5 @@ sampler-db.workspace = true
 sampler-scan.workspace = true
 thiserror.workspace = true
 serde.workspace = true
+memmap2 = "0.9.11"
 regex = "1.13.1"

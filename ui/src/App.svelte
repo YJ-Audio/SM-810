@@ -80,6 +80,19 @@
     playing: false,
     error: null,
   });
+  let caching = $state(false);
+  let cacheJobs = $derived(jobs.filter((j) => j.kind === 'preview_cache'));
+  let cacheDone = $derived(
+    cacheJobs
+      .filter((j) => j.state === 'done')
+      .reduce((n, j) => n + j.count, 0),
+  );
+  let cacheFailed = $derived(
+    cacheJobs
+      .filter((j) => j.state === 'failed')
+      .reduce((n, j) => n + j.count, 0),
+  );
+  let cacheTotal = $derived(cacheJobs.reduce((n, j) => n + j.count, 0));
   let linkTempo = $state(124);
   let matchLufs = $state(true),
     semitones = $state(0),
@@ -178,6 +191,7 @@
     tags = data.tags;
     jobs = data.jobs;
     analyzing = data.analyzing;
+    caching = data.caching;
     modelReady = data.model_ready;
     embedding = data.embedding;
     embedded = data.embedded;
@@ -676,12 +690,12 @@
     }
   }
   async function moveCollectionItem(earlier: boolean) {
-    if (!selected) return;
+    if (selection.length !== 1) return;
     try {
       similarityAnchor = null;
       await invoke('move_collection_item', {
         id: activeCollection,
-        sample: selected.id,
+        sample: selection[0],
         earlier,
       });
       await load(offset);
@@ -817,6 +831,15 @@
         Math.max(sliceStart + 1, sliceEnd + step),
       );
     void prepareSlice(!event.altKey);
+  }
+  async function cachePreviews(retry = false) {
+    try {
+      if (retry) await invoke('retry_preview_failures');
+      await invoke(caching ? 'pause_caching' : 'start_caching');
+      await refreshStatus();
+    } catch (e) {
+      fail(e);
+    }
   }
   async function saveSettings() {
     try {
@@ -1038,7 +1061,7 @@
               aria-label={`Rescan ${root.label}`}
               title="Rescan source"
               onclick={() => scanSource(root.id)}
-              disabled={!!busy || analyzing || embedding}
+              disabled={!!busy || analyzing || embedding || caching}
               ><Icon name="refresh" size={13} /></button
             >
           </div>{/each}
@@ -1126,7 +1149,7 @@
         >
         <button
           onclick={embedding ? pauseIndexing : indexSounds}
-          disabled={downloading || analyzing || !!busy}
+          disabled={downloading || analyzing || caching || !!busy}
           >{downloading
             ? 'Downloading…'
             : embedding
@@ -1159,6 +1182,7 @@
         ><button
           onclick={analyze}
           disabled={embedding ||
+            caching ||
             analyzing ||
             !!busy ||
             !analysisTotal ||
@@ -1699,6 +1723,34 @@
         {playback.link_peers ?? 0} connected peers. Link aligns loop starts to a 4-beat
         bar. Playback keeps its original tempo.
       </p>
+      <div class="preview-settings">
+        <strong>Fast previews</strong>
+        <p>
+          Cache the first second of compressed sounds and external or network
+          sources on this drive.
+        </p>
+        <p class="mono">
+          {count(cacheDone)} / {count(cacheTotal)} cached{cacheFailed
+            ? ` · ${count(cacheFailed)} failed`
+            : ''}
+        </p>
+        <button
+          class="outline-button"
+          type="button"
+          disabled={analyzing ||
+            embedding ||
+            !!busy ||
+            (!caching && cacheDone + cacheFailed === cacheTotal)}
+          onclick={() => cachePreviews()}
+          >{caching ? 'Pause preview caching' : 'Build preview cache'}</button
+        >
+        {#if cacheFailed}<button
+            class="outline-button"
+            type="button"
+            disabled={caching || analyzing || embedding || !!busy}
+            onclick={() => cachePreviews(true)}>Retry failed previews</button
+          >{/if}
+      </div>
       <label for="target-lufs">Target loudness (LUFS)</label><input
         id="target-lufs"
         type="number"
