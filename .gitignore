@@ -11,3 +11,5 @@ refs/
 ui/node_modules/
 ui/dist/
 src-tauri/gen/
+/tools/models/.venv/
+/tools/models/.cache/

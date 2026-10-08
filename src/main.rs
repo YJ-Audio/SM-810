@@ -22,6 +22,16 @@ enum Storage {
 }
 #[derive(Subcommand)]
 enum Command {
+	DownloadModel,
+	Embed {
+		#[arg(long,default_value_t=usize::MAX)]
+		limit: usize,
+	},
+	Similar {
+		sample: i64,
+		#[arg(long, default_value_t = 5)]
+		limit: usize,
+	},
 	Analyze {
 		#[arg(long,default_value_t=usize::MAX)]
 		limit: usize,
@@ -87,6 +97,25 @@ fn main() -> Result<()> {
 	})?;
 	let engine = Engine::open(&path)?;
 	match cli.command {
+		Command::DownloadModel => {
+			engine.download_model(|done, total| {
+				if done == total {
+					eprintln!("Model ready ({total} bytes)");
+				}
+			})?;
+		}
+		Command::Embed { limit } => {
+			let start = Instant::now();
+			let count = engine.embed_pending(limit)?;
+			println!(
+				"Processed {count} embedding jobs in {:.3}s; {} vectors ready",
+				start.elapsed().as_secs_f64(),
+				engine.embedding_count()
+			);
+		}
+		Command::Similar { sample, limit } => {
+			println!("{}", serde_json::to_string_pretty(&engine.similar(sample, limit)?)?)
+		}
 		Command::Analyze { limit } => println!("Processed {} analysis jobs", engine.analyze_pending(limit)?),
 		Command::Metadata { sample } => println!("{}", serde_json::to_string_pretty(&engine.analysis(sample)?)?),
 		Command::SetMetadata { sample, bpm, key, mode } => engine.set_manual(sample, bpm, key, mode)?,
@@ -113,7 +142,12 @@ fn main() -> Result<()> {
 		}
 		Command::Search { text, limit, offset } => println!(
 			"{}",
-			serde_json::to_string_pretty(&engine.search(&text, limit, offset)?)?
+			serde_json::to_string_pretty(&engine.browse(sampler_db::BrowseQuery {
+				text,
+				limit: Some(limit),
+				offset,
+				..Default::default()
+			})?)?
 		),
 		Command::Tag { sample, name } => engine.tag(sample, &name)?,
 		Command::Verify { limit } => println!("Verified {} jobs", engine.verify(limit)?),

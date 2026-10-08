@@ -5,6 +5,7 @@ use std::{io::Write, path::PathBuf};
 
 #[derive(Serialize)]
 pub struct Row {
+	pub similarity: Option<f32>,
 	#[serde(flatten)]
 	pub sample: db::Sample,
 	pub analysis: Option<db::AnalysisRecord>,
@@ -26,8 +27,8 @@ pub struct Waveform {
 
 impl Engine {
 	pub fn browse(&self, request: db::BrowseQuery) -> Result<Page> {
-		if request.text.trim_start().starts_with('~') {
-			return Err(Error::Invalid("Semantic search is not available yet".into()));
+		if request.text.trim_start().starts_with('~') || request.similar_to.is_some() {
+			return self.semantic_browse(request);
 		}
 		let reader = self.reader()?;
 		let page = db::browse(&reader, &request)?;
@@ -36,6 +37,7 @@ impl Engine {
 			let analysis = db::analysis(&reader, sample.id)?;
 			let peaks = self.peaks_with_reader(&reader, sample.id)?;
 			items.push(Row {
+				similarity: None,
 				sample,
 				analysis,
 				peaks,

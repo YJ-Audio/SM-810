@@ -18,6 +18,17 @@
     Playback,
   } from './types';
 
+  let modelReady = $state(false),
+    embedding = $state(false),
+    embedded = $state(0),
+    downloading = $state(false),
+    downloadPercent = $state(0);
+  let neighbors = $state<Sample[]>([]),
+    findingSimilar = $state(false),
+    similarError = $state('');
+  let sortBySimilarity = $state(true),
+    similarityAnchor = $state<number | null>(null);
+  let neighborRequest = 0;
   let roots = $state<Root[]>([]),
     tags = $state<Tag[]>([]),
     jobs = $state<Job[]>([]);
@@ -76,6 +87,11 @@
   let parsed = $derived(parseSearch(query));
   let activeTag = $derived(tagFilter ?? parsed.tag);
   let selectedKind = $derived(selected ? kind(selected) : null);
+  let embeddingFailed = $derived(
+    jobs
+      .filter((j) => j.kind === 'embed' && j.state === 'failed')
+      .reduce((sum, j) => sum + j.count, 0),
+  );
   let analysisTotal = $derived(
     jobs.filter((j) => j.kind === 'analyze').reduce((n, j) => n + j.count, 0),
   );
@@ -119,6 +135,7 @@
     text: parsed.text,
     tag: activeTag,
     root_id: activeRoot,
+    similar_to: sortBySimilarity && !parsed.semantic ? similarityAnchor : null,
     offset: start,
     limit,
   });
@@ -129,7 +146,57 @@
     tags = data.tags;
     jobs = data.jobs;
     analyzing = data.analyzing;
+    modelReady = data.model_ready;
+    embedding = data.embedding;
+    embedded = data.embedded;
+    downloading = data.downloading;
+    downloadPercent = data.download_total
+      ? (data.download_bytes / data.download_total) * 100
+      : 0;
     if (data.audio_error) error = data.audio_error;
+  }
+  async function findSimilar(sample: Sample) {
+    const revision = ++neighborRequest;
+    neighbors = [];
+    similarError = '';
+    if (!modelReady && !embedded) return;
+    findingSimilar = true;
+    try {
+      const results = await invoke<Sample[]>('similar', { id: sample.id });
+      if (revision === neighborRequest) neighbors = results;
+    } catch (e) {
+      if (revision === neighborRequest) similarError = String(e);
+    } finally {
+      if (revision === neighborRequest) findingSimilar = false;
+    }
+  }
+  async function indexSounds() {
+    try {
+      if (!modelReady) {
+        downloading = true;
+        await invoke('download_model');
+        await refreshStatus();
+      }
+      await invoke('start_embedding');
+      embedding = true;
+    } catch (e) {
+      fail(e);
+    } finally {
+      await refreshStatus().catch(fail);
+    }
+  }
+  async function repairModel() {
+    downloading = true;
+    try {
+      await invoke('download_model');
+    } catch (e) {
+      fail(e);
+    } finally {
+      await refreshStatus().catch(fail);
+    }
+  }
+  async function pauseIndexing() {
+    await invoke('pause_embedding').catch(fail);
   }
   async function load(start = 0) {
     const revision = ++request;
@@ -201,7 +268,12 @@
   function stop() {
     void invoke('audition', { id: null, settings: settings() }).catch(fail);
   }
-  async function select(sample: Sample, index: number, range = false) {
+  async function select(
+    sample: Sample,
+    index: number,
+    range = false,
+    reorder = true,
+  ) {
     const revision = ++detailRequest;
     if (range) {
       try {
@@ -230,6 +302,19 @@
     metaKey = sample.analysis?.key_root?.toString() ?? '';
     metaMode = sample.analysis?.key_mode ?? '';
     play(sample);
+    void findSimilar(sample);
+    if (
+      reorder &&
+      !range &&
+      sortBySimilarity &&
+      embedded > 0 &&
+      !parsed.semantic
+    ) {
+      similarityAnchor = sample.id;
+      if (scroller) scroller.scrollTop = 0;
+      await load();
+      anchor = rows.findIndex((r) => r.id === sample.id);
+    }
     if (!sample.available) return;
     try {
       const result = await invoke<Wave>('waveform', { id: sample.id });
@@ -257,7 +342,7 @@
       sample = rows[index - offset];
     }
     if (sample) {
-      void select(sample, index);
+      void select(sample, index, false, false);
       prefetch(index);
       if (scroller) {
         if (index * rowHeight < scroller.scrollTop)
@@ -291,6 +376,11 @@
       ++detailRequest;
       ++sliceRequest;
       selected = null;
+      ++neighborRequest;
+      neighbors = [];
+      findingSimilar = false;
+      similarityAnchor = null;
+      void load();
       selection = [];
       wave = null;
       slicePath = null;
@@ -568,7 +658,8 @@
     const unlisten: (() => void)[] = [];
     let lastAnalysisRefresh = 0;
     for (const event of ['library-updated', 'analysis-progress']) {
-      void listen(event, () => {
+      void listen<string | null>(event, ({ payload }) => {
+        if (payload) fail(payload);
         void refreshStatus().catch(fail);
         if (
           event === 'library-updated' ||
@@ -631,6 +722,7 @@
       onclick={() => {
         mode = 'list';
         query = '';
+        similarityAnchor = null;
         filterRoot(null);
         filterTag(null);
       }}
@@ -652,6 +744,7 @@
             query = query.replace(/(?:^|\s)#[^\s]+/g, '').trim();
             filterTag(null);
           }}>#{activeTag}<Icon name="close" size={12} /></button
+        >{/if}{#if parsed.semantic}<span class="search-chip">Sound search</span
         >{/if}<input
         bind:this={searchInput}
         bind:value={query}
@@ -730,7 +823,7 @@
               aria-label={`Rescan ${root.label}`}
               title="Rescan source"
               onclick={() => scanSource(root.id)}
-              disabled={!!busy || analyzing}
+              disabled={!!busy || analyzing || embedding}
               ><Icon name="refresh" size={13} /></button
             >
           </div>{/each}
@@ -764,6 +857,37 @@
         </p>
       </section>
     </div>
+    <div class="embedding-status">
+      <div>
+        <span
+          >{downloading
+            ? `Downloading model · ${downloadPercent.toFixed(0)}%`
+            : embedding
+              ? 'Embedding sounds'
+              : 'Similarity index'}</span
+        ><span class="mono">{count(embedded)}</span>
+      </div>
+      <div class="analysis-caption">
+        <span
+          >{embeddingFailed
+            ? `${embeddingFailed} failed · CLAP`
+            : modelReady
+              ? 'CLAP · on this device'
+              : 'Local model · 622 MB'}</span
+        >
+        <button
+          onclick={embedding ? pauseIndexing : indexSounds}
+          disabled={downloading || analyzing || !!busy}
+          >{downloading
+            ? 'Downloading…'
+            : embedding
+              ? 'Pause'
+              : modelReady
+                ? 'Index sounds'
+                : 'Enable'}</button
+        >
+      </div>
+    </div>
     <div class="analysis-status">
       <div>
         <span class:analyzing
@@ -785,7 +909,8 @@
               : 'Audio metadata & waveforms'}</span
         ><button
           onclick={analyze}
-          disabled={analyzing ||
+          disabled={embedding ||
+            analyzing ||
             !!busy ||
             !analysisTotal ||
             analysisDone === analysisTotal}
@@ -801,10 +926,29 @@
         <strong>{count(total)}</strong> samples{#if activeRoot}<span
             >· {roots.find((r) => r.id === activeRoot)?.label}</span
           >{/if}{#if activeTag}<span>· #{activeTag}</span
+          >{/if}{#if parsed.semantic || similarityAnchor}<span
+            >· indexed sounds</span
           >{/if}{#if loading}<span class="loading-dot"></span>{/if}
       </div>
       <div class="toolbar-actions">
-        <span class="sort-label">Sort: Name <span>↑</span></span>
+        <button
+          class="sort-label"
+          disabled={parsed.semantic || !selected || !embedded}
+          onclick={() => {
+            sortBySimilarity = !sortBySimilarity;
+            similarityAnchor = sortBySimilarity ? (selected?.id ?? null) : null;
+            if (scroller) scroller.scrollTop = 0;
+            void load();
+          }}
+          title={similarityAnchor
+            ? 'The order stays fixed while using arrow keys'
+            : 'Sort by similarity to the selected sound'}
+          >Sort: {parsed.semantic
+            ? 'Text similarity'
+            : sortBySimilarity && similarityAnchor
+              ? 'Similar to selection'
+              : 'Name ↑'}</button
+        >
         <div class="column-control">
           <button
             class="outline-button"
@@ -897,6 +1041,7 @@
                 class="outline-button"
                 onclick={() => {
                   query = '';
+                  similarityAnchor = null;
                   tagFilter = null;
                   activeRoot = null;
                   void load();
@@ -1094,14 +1239,22 @@
       </section>
       <section class="similar">
         <h2>Similar</h2>
-        <div class="similar-empty">
-          <span class="similar-ring"></span>
-          <p>
-            Find more sounds like this.<br /><span
-              >Similarity search is not available yet.</span
-            >
-          </p>
-        </div>
+        {#if findingSimilar}<p class="sidebar-empty">Finding nearby sounds…</p>
+        {:else if similarError}<p class="sidebar-empty">{similarError}</p>
+        {:else if neighbors.length}
+          {#each neighbors as sample}<button
+              class="similar-row"
+              onclick={() => select(sample, 0)}
+              title={sample.path}
+              ><i class="dot" style:background={kind(sample).color}></i><span
+                >{sample.name}</span
+              ><small>{sample.similarity?.toFixed(2)}</small></button
+            >{/each}
+        {:else}<p class="sidebar-empty">
+            {modelReady
+              ? 'Index more sounds to find similar samples.'
+              : 'Enable local similarity search to find sounds like this.'}
+          </p>{/if}
       </section>
       <div class="inspector-bottom">
         <Icon name="check" size={14} /><span>Original file stays untouched</span
@@ -1194,6 +1347,15 @@
       /><label class="checkbox-label"
         ><input type="checkbox" bind:checked={matchLufs} />Match LUFS when
         auditioning</label
-      ><button class="primary-button" type="submit">Save settings</button>
+      ><button
+        class="outline-button"
+        type="button"
+        disabled={embedding || downloading}
+        onclick={repairModel}
+        >{downloading
+          ? 'Checking model…'
+          : 'Verify / repair similarity model'}</button
+      >
+      <button class="primary-button" type="submit">Save settings</button>
     </form>{/if}
 </dialog>

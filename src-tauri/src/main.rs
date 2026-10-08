@@ -8,7 +8,7 @@ use std::{
 	path::PathBuf,
 	sync::{
 		Arc, Mutex,
-		atomic::{AtomicBool, Ordering},
+		atomic::{AtomicBool, AtomicU64, Ordering},
 	},
 	time::Duration,
 };
@@ -19,6 +19,11 @@ struct App {
 	audio: Mutex<Option<Auditioner>>,
 	audio_error: Option<String>,
 	analyzing: Arc<AtomicBool>,
+	embedding: Arc<AtomicBool>,
+	pause_embedding: Arc<AtomicBool>,
+	downloading: Arc<AtomicBool>,
+	download_bytes: Arc<AtomicU64>,
+	download_total: Arc<AtomicU64>,
 }
 type Reply = Result<Value, String>;
 fn json_result<T: serde::Serialize>(value: sampler_engine::Result<T>) -> Reply {
@@ -37,6 +42,10 @@ async fn bootstrap(state: State<'_, App>) -> Reply {
 	let engine = state.engine.clone();
 	let audio_error = state.audio_error.clone();
 	let analyzing = state.analyzing.load(Ordering::Acquire);
+	let embedding = state.embedding.load(Ordering::Acquire);
+	let downloading = state.downloading.load(Ordering::Acquire);
+	let download_bytes = state.download_bytes.load(Ordering::Relaxed);
+	let download_total = state.download_total.load(Ordering::Relaxed);
 	work(move || {
 		Ok(json!({
 			"roots": engine.roots().map_err(|e| e.to_string())?,
@@ -44,6 +53,8 @@ async fn bootstrap(state: State<'_, App>) -> Reply {
 			"jobs": engine.jobs().map_err(|e| e.to_string())?,
 			"audio_error": audio_error,
 			"analyzing": analyzing,
+			"embedding": embedding, "model_ready": engine.model_ready(), "embedded": engine.embedding_count(),
+			"downloading": downloading, "download_bytes": download_bytes, "download_total": download_total,
 		}))
 	})
 	.await
@@ -51,7 +62,14 @@ async fn bootstrap(state: State<'_, App>) -> Reply {
 #[tauri::command]
 async fn browse(state: State<'_, App>, query: sampler_db::BrowseQuery) -> Reply {
 	let engine = state.engine.clone();
-	work(move || json_result(engine.browse(query))).await
+	work(move || {
+		json_result((|| {
+			let result = engine.browse(query)?;
+			engine.prioritize_embeddings(result.items.iter().map(|r| r.sample.id).collect())?;
+			Ok(result)
+		})())
+	})
+	.await
 }
 #[tauri::command]
 async fn waveform(state: State<'_, App>, id: i64) -> Reply {
@@ -152,6 +170,50 @@ fn start_analysis(app: tauri::AppHandle, state: State<'_, App>) -> Result<(), St
 	});
 	Ok(())
 }
+#[tauri::command]
+async fn similar(state: State<'_, App>, id: i64) -> Reply {
+	let engine = state.engine.clone();
+	work(move || json_result(engine.similar(id, 5))).await
+}
+#[tauri::command]
+fn pause_embedding(state: State<'_, App>) {
+	state.pause_embedding.store(true, Ordering::Release);
+}
+#[tauri::command]
+fn start_embedding(app: tauri::AppHandle, state: State<'_, App>) -> Result<(), String> {
+	if state.embedding.swap(true, Ordering::AcqRel) {
+		return Ok(());
+	}
+	state.pause_embedding.store(false, Ordering::Release);
+	let engine = state.engine.clone();
+	let active = state.embedding.clone();
+	let pause = state.pause_embedding.clone();
+	std::thread::spawn(move || {
+		let result = engine.embed_until(usize::MAX, || pause.load(Ordering::Acquire));
+		active.store(false, Ordering::Release);
+		let _ = app.emit("library-updated", result.err().map(|e| e.to_string()));
+	});
+	Ok(())
+}
+#[tauri::command]
+async fn download_model(state: State<'_, App>) -> Reply {
+	if state.downloading.swap(true, Ordering::AcqRel) {
+		return Err("Model download is already running".into());
+	}
+	let engine = state.engine.clone();
+	let active = state.downloading.clone();
+	let bytes = state.download_bytes.clone();
+	let total = state.download_total.clone();
+	work(move || {
+		let result = engine.download_model(|done, size| {
+			bytes.store(done, Ordering::Relaxed);
+			total.store(size, Ordering::Relaxed);
+		});
+		active.store(false, Ordering::Release);
+		json_result(result)
+	})
+	.await
+}
 fn main() {
 	tauri::Builder::default()
 		.plugin(tauri_plugin_dialog::init())
@@ -173,13 +235,21 @@ fn main() {
 				audio: Mutex::new(audio),
 				audio_error,
 				analyzing: Arc::new(AtomicBool::new(false)),
+				embedding: Arc::new(AtomicBool::new(false)),
+				pause_embedding: Arc::new(AtomicBool::new(false)),
+				downloading: Arc::new(AtomicBool::new(false)),
+				download_bytes: Arc::new(AtomicU64::new(0)),
+				download_total: Arc::new(AtomicU64::new(0)),
 			});
 			let handle = app.handle().clone();
 			std::thread::spawn(move || {
 				loop {
 					std::thread::sleep(Duration::from_secs(2));
 					let state = handle.state::<App>();
-					if state.analyzing.load(Ordering::Acquire) {
+					if state.analyzing.load(Ordering::Acquire)
+						|| state.embedding.load(Ordering::Acquire)
+						|| state.downloading.load(Ordering::Acquire)
+					{
 						let _ = handle.emit("analysis-progress", ());
 					}
 				}
@@ -199,7 +269,11 @@ fn main() {
 			edit_metadata,
 			snap_slice,
 			prepare_drag,
-			start_analysis
+			start_analysis,
+			similar,
+			start_embedding,
+			pause_embedding,
+			download_model
 		])
 		.run(tauri::generate_context!())
 		.expect("Tauri application initialization failed");

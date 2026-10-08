@@ -1177,3 +1177,39 @@ dialog .source-path {
     transition: none !important;
   }
 }
+
+.embedding-status {
+  border-top: 1px solid var(--line);
+  padding: 16px 20px;
+  font-size: 12px;
+}
+.embedding-status > div:first-child {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 9px;
+}
+.similar-row {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 4px;
+  text-align: left;
+  border-radius: 6px;
+}
+.similar-row:hover {
+  background: #24272c;
+}
+.similar-row > span {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: 'Geist Mono', monospace;
+  font-size: 12px;
+}
+.similar-row small {
+  color: #929aa5;
+  font-family: 'Geist Mono', monospace;
+}

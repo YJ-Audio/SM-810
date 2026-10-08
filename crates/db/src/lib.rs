@@ -225,6 +225,8 @@ pub struct Sample {
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct BrowseQuery {
+	pub ids: Option<Vec<i64>>,
+	pub similar_to: Option<i64>,
 	#[serde(default)]
 	pub text: String,
 	pub root_id: Option<i64>,
@@ -250,10 +252,8 @@ pub fn search(db: &Connection, text: &str, limit: usize, offset: usize) -> Resul
 	)?
 	.items)
 }
-pub fn browse(db: &Connection, request: &BrowseQuery) -> Result<Page> {
+fn filters(request: &BrowseQuery) -> (String, String) {
 	let text = &request.text;
-	let limit = request.limit.unwrap_or(100);
-	let offset = request.offset;
 	let quoted = format!("\"{}\"", text.replace('"', "\"\""));
 	let pattern = format!(
 		"%{}%",
@@ -273,9 +273,40 @@ pub fn browse(db: &Connection, request: &BrowseQuery) -> Result<Page> {
 		)
 	};
 	let filter = format!(
-		"({filter}) AND (?4 IS NULL OR f.root_id=?4) AND (?5 IS NULL OR s.id IN (WITH RECURSIVE tag_paths(id,path) AS (SELECT id,name FROM tags WHERE parent_id IS NULL UNION ALL SELECT t.id,p.path || '/' || t.name FROM tags t JOIN tag_paths p ON t.parent_id=p.id), descendants(id) AS (SELECT id FROM tags WHERE name=?5 COLLATE NOCASE OR id IN (SELECT id FROM tag_paths WHERE path=?5 COLLATE NOCASE) UNION ALL SELECT tags.id FROM tags JOIN descendants ON tags.parent_id=descendants.id) SELECT st.sample_id FROM sample_tags st JOIN descendants d ON d.id=st.tag_id))"
+		"({filter}) AND (?6 IS NULL OR s.id IN (SELECT value FROM json_each(?6))) AND (?4 IS NULL OR f.root_id=?4) AND (?5 IS NULL OR s.id IN (WITH RECURSIVE tag_paths(id,path) AS (SELECT id,name FROM tags WHERE parent_id IS NULL UNION ALL SELECT t.id,p.path || '/' || t.name FROM tags t JOIN tag_paths p ON t.parent_id=p.id), descendants(id) AS (SELECT id FROM tags WHERE name=?5 COLLATE NOCASE OR id IN (SELECT id FROM tag_paths WHERE path=?5 COLLATE NOCASE) UNION ALL SELECT tags.id FROM tags JOIN descendants ON tags.parent_id=descendants.id) SELECT st.sample_id FROM sample_tags st JOIN descendants d ON d.id=st.tag_id))"
 	);
-	let total:usize=db.query_row(&format!("SELECT COUNT(DISTINCT s.id) FROM samples s JOIN files f ON f.sample_id=s.id WHERE {filter} AND ?2 IS NULL AND ?3 IS NULL"),params![query,Option::<i64>::None,Option::<i64>::None,request.root_id,request.tag],|row|Ok(row.get::<_,i64>(0)? as usize))?;
+	(filter, query)
+}
+fn ids_json(request: &BrowseQuery) -> Option<String> {
+	request
+		.ids
+		.as_ref()
+		.map(|ids| format!("[{}]", ids.iter().map(i64::to_string).collect::<Vec<_>>().join(",")))
+}
+pub fn matching_ids(db: &Connection, request: &BrowseQuery) -> Result<Vec<i64>> {
+	let (filter, query) = filters(request);
+	let mut statement = db.prepare(&format!(
+		"SELECT DISTINCT s.id FROM samples s JOIN files f ON f.sample_id=s.id WHERE {filter} AND ?2 IS NULL AND ?3 IS NULL"
+	))?;
+	Ok(statement
+		.query_map(
+			params![
+				query,
+				Option::<i64>::None,
+				Option::<i64>::None,
+				request.root_id,
+				request.tag,
+				ids_json(request)
+			],
+			|row| row.get(0),
+		)?
+		.collect::<std::result::Result<Vec<_>, _>>()?)
+}
+pub fn browse(db: &Connection, request: &BrowseQuery) -> Result<Page> {
+	let (filter, query) = filters(request);
+	let limit = request.limit.unwrap_or(100);
+	let offset = request.offset;
+	let total:usize=db.query_row(&format!("SELECT COUNT(DISTINCT s.id) FROM samples s JOIN files f ON f.sample_id=s.id WHERE {filter} AND ?2 IS NULL AND ?3 IS NULL"),params![query,Option::<i64>::None,Option::<i64>::None,request.root_id,request.tag,ids_json(request)],|row|Ok(row.get::<_,i64>(0)? as usize))?;
 	let sql = format!(
 		"WITH ranked AS (SELECT s.id,s.size,f.rel_path,r.path,r.id AS root_id,(r.enabled AND rs.status!='offline' AND f.last_seen_scan>=rs.complete_generation) AS available,ROW_NUMBER() OVER (PARTITION BY s.id ORDER BY (r.enabled AND rs.status!='offline' AND f.last_seen_scan>=rs.complete_generation) DESC,f.id) AS rank FROM samples s JOIN files f ON f.sample_id=s.id JOIN roots r ON r.id=f.root_id JOIN root_state rs ON rs.root_id=r.id WHERE {filter}) SELECT id,size,rel_path,path,root_id,available FROM ranked WHERE rank=1 ORDER BY rel_path COLLATE NOCASE,id LIMIT ?2 OFFSET ?3"
 	);
@@ -285,7 +316,8 @@ pub fn browse(db: &Connection, request: &BrowseQuery) -> Result<Page> {
 		limit.min(100000) as i64,
 		offset as i64,
 		request.root_id,
-		request.tag
+		request.tag,
+		ids_json(request)
 	])?;
 	let mut results = Vec::new();
 	while let Some(row) = rows.next()? {

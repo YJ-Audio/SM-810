@@ -5,7 +5,7 @@ use std::{
 	fs::{File, OpenOptions},
 	path::{Path, PathBuf},
 	sync::{
-		Mutex,
+		Mutex, RwLock,
 		mpsc::{self, SyncSender},
 	},
 	thread::{self, JoinHandle},
@@ -15,6 +15,10 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum Error {
+	#[error(transparent)]
+	Embed(#[from] sampler_embed::Error),
+	#[error(transparent)]
+	Similarity(#[from] sampler_similarity::Error),
 	#[error(transparent)]
 	Audio(#[from] sampler_audio::Error),
 	#[error("WAV export: {0}")]
@@ -33,7 +37,7 @@ pub enum Error {
 	Io(#[from] std::io::Error),
 	#[error("writer thread stopped")]
 	WriterStopped,
-	#[error("another scan or verification is already running")]
+	#[error("another library operation is already running")]
 	Busy,
 	#[error("invalid source: {0}")]
 	Invalid(String),
@@ -46,6 +50,9 @@ struct Request {
 }
 
 pub struct Engine {
+	vectors: RwLock<sampler_similarity::Store>,
+	model: Mutex<Option<sampler_embed::Model>>,
+	embedding_lock: Mutex<()>,
 	_process_lock: File,
 	path: PathBuf,
 	sender: Option<SyncSender<Request>>,
@@ -109,7 +116,11 @@ impl Engine {
 			}
 		})?;
 		ready_rx.recv().map_err(|_| Error::WriterStopped)??;
+		let vectors = embedding::load_store(&path)?;
 		Ok(Self {
+			vectors: RwLock::new(vectors),
+			model: Mutex::new(None),
+			embedding_lock: Mutex::new(()),
 			_process_lock: process_lock,
 			path,
 			sender: Some(sender),
@@ -328,6 +339,10 @@ impl Engine {
 			self.write(move |tx| db::finish_hash_job(tx, id, error.as_deref()))?;
 			processed += 1;
 		}
+		*self
+			.vectors
+			.write()
+			.map_err(|_| Error::Invalid("Vector store lock poisoned".into()))? = embedding::load_store(&self.path)?;
 		Ok(processed)
 	}
 
@@ -363,3 +378,5 @@ mod analysis_jobs;
 
 pub mod audition;
 mod desktop;
+
+mod embedding;

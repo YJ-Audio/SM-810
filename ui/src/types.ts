@@ -21,6 +21,7 @@ export type Sample = {
   size: number;
   analysis: Analysis | null;
   peaks: number[];
+  similarity: number | null;
 };
 export type Page = { items: Sample[]; total: number };
 export type Root = {
@@ -45,6 +46,12 @@ export type Bootstrap = {
   jobs: Job[];
   audio_error: string | null;
   analyzing: boolean;
+  embedding: boolean;
+  embedded: number;
+  model_ready: boolean;
+  downloading: boolean;
+  download_bytes: number;
+  download_total: number;
 };
 export type Wave = {
   peaks: number[];

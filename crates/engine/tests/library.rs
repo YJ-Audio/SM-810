@@ -242,6 +242,8 @@ fn browsing_filters_hierarchy_and_root_before_paging() {
 	let snare = engine.search("snare", 1, 0).unwrap()[0].id;
 	engine.tag(snare, "Drums/One shots/snare").unwrap();
 	let request = sampler_db::BrowseQuery {
+		ids: None,
+		similar_to: None,
 		text: String::new(),
 		root_id: Some(root),
 		tag: Some("Drums/One shots".into()),
@@ -280,4 +282,96 @@ fn library_lock_prevents_concurrent_job_recovery_and_releases_on_close() {
 	drop(first);
 	let second = Engine::open(&path).unwrap();
 	assert!(second.roots().unwrap().is_empty());
+}
+
+#[test]
+fn similarity_survives_restart_filters_before_paging_and_separates_model_revisions() {
+	use sampler_db::BrowseQuery;
+	use sampler_embed::{DIMENSIONS, MODEL};
+	let dir = tempfile::tempdir().unwrap();
+	let source = dir.path().join("sounds");
+	fs::create_dir(&source).unwrap();
+	for (i, name) in ["kick", "snare", "hat", "pad"].iter().enumerate() {
+		fs::write(source.join(format!("{name}.wav")), [i as u8]).unwrap();
+	}
+	let path = dir.path().join("library.db");
+	let engine = Engine::open(&path).unwrap();
+	let root = engine.add_root(&source, "Test", Storage::Local).unwrap();
+	engine.scan(root).unwrap();
+	let ids: Vec<_> = ["kick", "snare", "hat", "pad"]
+		.into_iter()
+		.map(|name| engine.search(name, 1, 0).unwrap()[0].id)
+		.collect();
+	engine.tag(ids[1], "Drums/snare").unwrap();
+	engine.tag(ids[2], "Drums/hat").unwrap();
+	for (i, &id) in ids.iter().enumerate() {
+		let mut vector = vec![0.0f32; DIMENSIONS];
+		vector[0] = 1.0;
+		vector[1] = i as f32;
+		let bytes: Vec<_> = vector.iter().flat_map(|v| v.to_le_bytes()).collect();
+		engine
+			.write(move |tx| {
+				tx.execute(
+					"INSERT INTO embeddings(model,sample_id,dim,vec) VALUES(?1,?2,?3,?4)",
+					(
+						if i == 3 { "obsolete-model" } else { MODEL },
+						id,
+						DIMENSIONS as i64,
+						bytes,
+					),
+				)?;
+				Ok(())
+			})
+			.unwrap();
+	}
+	drop(engine);
+	let engine = Engine::open(&path).unwrap();
+	assert_eq!(engine.embedding_count(), 3);
+	// The source bytes are deliberately not audio: this search must use the stored vectors.
+	let neighbors = engine.similar(ids[0], 5).unwrap();
+	assert_eq!(neighbors.iter().map(|r| r.sample.id).collect::<Vec<_>>(), ids[1..3]);
+	assert!((neighbors[0].similarity.unwrap() - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-6);
+	let request = BrowseQuery {
+		similar_to: Some(ids[0]),
+		root_id: Some(root),
+		tag: Some("Drums".into()),
+		limit: Some(1),
+		offset: 1,
+		..Default::default()
+	};
+	let page = engine.browse(request.clone()).unwrap();
+	assert_eq!(page.total, 2);
+	assert_eq!(page.items[0].sample.id, ids[2]);
+	assert_eq!(
+		engine
+			.browse(BrowseQuery {
+				ids: Some(vec![ids[1]]),
+				offset: 0,
+				..request.clone()
+			})
+			.unwrap()
+			.items[0]
+			.sample
+			.id,
+		ids[1]
+	);
+	assert_eq!(
+		engine
+			.browse(BrowseQuery {
+				root_id: Some(-1),
+				..request
+			})
+			.unwrap()
+			.total,
+		0
+	);
+	let page = engine
+		.browse(BrowseQuery {
+			similar_to: Some(ids[0]),
+			text: "snare".into(),
+			..Default::default()
+		})
+		.unwrap();
+	assert_eq!(page.total, 1);
+	assert_eq!(page.items[0].sample.id, ids[1]);
 }
