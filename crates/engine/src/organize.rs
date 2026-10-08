@@ -114,7 +114,10 @@ impl Engine {
 				let (sample, path) = file.map_err(db::Error::from)?;
 				for (rule, tag, target, expression) in &compiled {
 					let text = match target {
-						RuleTarget::Filename => path.rsplit('/').next().unwrap_or(&path),
+						RuleTarget::Filename => std::path::Path::new(&path)
+							.file_name()
+							.and_then(|name| name.to_str())
+							.unwrap_or(&path),
 						RuleTarget::RelPath => &path,
 					};
 					if expression.is_match(text) {

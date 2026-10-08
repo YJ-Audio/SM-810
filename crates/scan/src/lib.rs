@@ -82,6 +82,9 @@ pub fn fingerprint(root: &Path, path: &Path) -> Result<Entry, Error> {
 		.to_str()
 		.ok_or_else(|| Error::Encoding(path.to_path_buf()))?
 		.to_owned();
+	// Persist one separator convention so path rules behave the same on every OS.
+	#[cfg(windows)]
+	let rel_path = rel_path.replace('\\', "/");
 	let mtime = before
 		.modified()
 		.map_err(|e| io(path, e))?

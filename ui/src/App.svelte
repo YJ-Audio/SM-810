@@ -26,6 +26,8 @@
     Collection,
   } from './types';
 
+  const shortcutModifier = navigator.platform.includes('Mac') ? '⌘' : 'Ctrl';
+
   let collections = $state<Collection[]>([]),
     rules = $state<Rule[]>([]),
     activeCollection = $state<number | null>(null);
@@ -990,7 +992,7 @@
         oninput={searchChanged}
         placeholder="Name, #tag, or describe a sound…"
         aria-label="Search samples"
-      /><kbd>⌘ K</kbd>
+      /><kbd>{shortcutModifier} K</kbd>
     </div>
     <button
       class="link-button"

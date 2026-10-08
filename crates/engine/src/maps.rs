@@ -297,7 +297,14 @@ impl Engine {
 		let stderr = dir.path().join("stderr.txt");
 		sampler_layout::write_input(&input, &ids, DIMENSIONS, &matrix)?;
 		drop(matrix);
-		let mut child = Command::new(program)
+		let mut command = Command::new(program);
+		// Layout recomputation must not open a console over the desktop window.
+		#[cfg(windows)]
+		{
+			use std::os::windows::process::CommandExt;
+			command.creation_flags(0x08000000); // CREATE_NO_WINDOW
+		}
+		let mut child = command
 			.arg(&input)
 			.arg(&output)
 			.stdout(Stdio::null())

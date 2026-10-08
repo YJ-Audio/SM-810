@@ -103,15 +103,16 @@ fn short_queries_and_punctuation_are_literal_and_pages_do_not_overlap() {
 	let dir = tempfile::tempdir().unwrap();
 	let source = dir.path().join("source");
 	fs::create_dir(&source).unwrap();
-	for (i, name) in ["a_100%.wav", "b_日本語.wav", "c_quo\"te.wav"].iter().enumerate() {
+	for (i, name) in ["a_100%.wav", "b_日本語.wav", "c_quo'te.wav"].iter().enumerate() {
 		fs::write(source.join(name), [i as u8]).unwrap();
 	}
 	let engine = Engine::open(dir.path().join("library.db")).unwrap();
 	let root = engine.add_root(&source, "Main", Storage::Local).unwrap();
 	engine.scan(root).unwrap();
-	for query in ["%", "日本", "日本語", "quo\"te"] {
+	for query in ["%", "日本", "日本語", "quo'te"] {
 		assert_eq!(engine.search(query, 10, 0).unwrap().len(), 1);
 	}
+	assert!(engine.search("quo\"te", 10, 0).unwrap().is_empty());
 	assert_ne!(
 		engine.search("", 1, 0).unwrap()[0].id,
 		engine.search("", 1, 1).unwrap()[0].id
@@ -722,6 +723,7 @@ fn preview_pack_is_persistent_append_only_and_available_without_source_io() {
 	let short = engine.search("a-short", 1, 0).unwrap()[0].id;
 	let exact = engine.search("b-exact", 1, 0).unwrap()[0].id;
 	let long = engine.search("c-long", 1, 0).unwrap()[0].id;
+	engine.prioritize_embeddings(vec![short]).unwrap();
 	assert_eq!(engine.cache_previews(3, || true).unwrap(), 0);
 	assert_eq!(engine.cache_previews(1, || false).unwrap(), 1);
 	let first = fs::read(dir.path().join("preview.pack")).unwrap();
@@ -848,4 +850,41 @@ fn desktop_watcher_rescans_changes_and_restores_offline_roots() {
 	assert!(restored.available);
 	assert_eq!(restored.tag_paths, kick.tag_paths);
 	assert_eq!(fs::read(source.join("Kick_renamed.wav")).unwrap(), b"original kick");
+}
+
+#[test]
+fn nested_path_rules_use_portable_separators_and_only_the_filename() {
+	use sampler_engine::organize::{Rule, RuleTarget};
+	let dir = tempfile::tempdir().unwrap();
+	let source = dir.path().join("日本語 Samples");
+	fs::create_dir_all(source.join("Kick Folder")).unwrap();
+	fs::write(source.join("Kick Folder/Snare.wav"), b"snare").unwrap();
+	fs::write(source.join("Kick Folder/Kick.wav"), b"kick").unwrap();
+	let engine = Engine::open(dir.path().join("library.db")).unwrap();
+	let root = engine.add_root(&source, "Nested", Storage::Local).unwrap();
+	engine
+		.save_rule(Rule {
+			id: None,
+			tag: "filename".into(),
+			target: RuleTarget::Filename,
+			pattern: "^Kick".into(),
+			enabled: true,
+		})
+		.unwrap();
+	engine
+		.save_rule(Rule {
+			id: None,
+			tag: "folder".into(),
+			target: RuleTarget::RelPath,
+			pattern: "^Kick Folder/".into(),
+			enabled: true,
+		})
+		.unwrap();
+	engine.scan(root).unwrap();
+	let snare = engine.search("Snare", 1, 0).unwrap().remove(0);
+	assert_eq!(snare.tags, vec!["folder"]);
+	assert!(snare.path.is_file());
+	let kick = engine.search("Kick.wav", 1, 0).unwrap().remove(0);
+	assert_eq!(kick.tags, vec!["filename", "folder"]);
+	assert!(kick.path.is_file());
 }

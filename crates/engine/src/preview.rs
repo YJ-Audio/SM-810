@@ -95,7 +95,8 @@ impl Engine {
 			.collect();
 		let pack = self.path.with_file_name("preview.pack");
 		self.write(move |tx| {
-			let mut pack = OpenOptions::new().create(true).append(true).open(pack)?;
+			// Windows cannot lock an append-only handle; read access enables LockFileEx.
+			let mut pack = OpenOptions::new().create(true).read(true).append(true).open(pack)?;
 			pack.lock()?;
 			let offset = pack.seek(SeekFrom::End(0))?;
 			pack.write_all(&bytes)?; pack.sync_data()?;
