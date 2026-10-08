@@ -80,6 +80,17 @@
     playing: false,
     error: null,
   });
+  let verifying = $state(false);
+  let hashJobs = $derived(jobs.filter((j) => j.kind === 'full_hash'));
+  let hashesDone = $derived(
+    hashJobs.filter((j) => j.state === 'done').reduce((n, j) => n + j.count, 0),
+  );
+  let hashesFailed = $derived(
+    hashJobs
+      .filter((j) => j.state === 'failed')
+      .reduce((n, j) => n + j.count, 0),
+  );
+  let hashesTotal = $derived(hashJobs.reduce((n, j) => n + j.count, 0));
   let caching = $state(false);
   let cacheJobs = $derived(jobs.filter((j) => j.kind === 'preview_cache'));
   let cacheDone = $derived(
@@ -192,6 +203,7 @@
     jobs = data.jobs;
     analyzing = data.analyzing;
     caching = data.caching;
+    verifying = data.verifying;
     modelReady = data.model_ready;
     embedding = data.embedding;
     embedded = data.embedded;
@@ -630,11 +642,8 @@
       await invoke('edit_tag', { ids: [id], name, remove: true });
       await refreshStatus();
       await load(offset);
-      if (selected?.id === id)
-        selected = {
-          ...selected,
-          tags: selected.tags.filter((t) => t !== name),
-        };
+      const page = await invoke<Page>('sample', { id });
+      if (selected?.id === id && page.items[0]) selected = page.items[0];
     } catch (e) {
       fail(e);
     }
@@ -1061,8 +1070,11 @@
               aria-label={`Rescan ${root.label}`}
               title="Rescan source"
               onclick={() => scanSource(root.id)}
-              disabled={!!busy || analyzing || embedding || caching}
-              ><Icon name="refresh" size={13} /></button
+              disabled={!!busy ||
+                analyzing ||
+                embedding ||
+                caching ||
+                verifying}><Icon name="refresh" size={13} /></button
             >
           </div>{/each}
         {#if !roots.length}<button
@@ -1149,7 +1161,7 @@
         >
         <button
           onclick={embedding ? pauseIndexing : indexSounds}
-          disabled={downloading || analyzing || caching || !!busy}
+          disabled={downloading || analyzing || caching || verifying || !!busy}
           >{downloading
             ? 'Downloading…'
             : embedding
@@ -1183,6 +1195,7 @@
           onclick={analyze}
           disabled={embedding ||
             caching ||
+            verifying ||
             analyzing ||
             !!busy ||
             !analysisTotal ||
@@ -1588,7 +1601,7 @@
       <section class="inspector-tags">
         <h2>Tags</h2>
         <div class="tag-chips">
-          {#each selected.tags as tag}<button
+          {#each selected.tag_paths ?? selected.tags as tag}<button
               class="tag-chip"
               title={`Remove #${tag}`}
               onclick={() => removeTag(tag)}>#{tag}<span>×</span></button
@@ -1738,6 +1751,7 @@
           class="outline-button"
           type="button"
           disabled={analyzing ||
+            verifying ||
             embedding ||
             !!busy ||
             (!caching && cacheDone + cacheFailed === cacheTotal)}
@@ -1747,8 +1761,44 @@
         {#if cacheFailed}<button
             class="outline-button"
             type="button"
-            disabled={caching || analyzing || embedding || !!busy}
+            disabled={caching || analyzing || verifying || embedding || !!busy}
             onclick={() => cachePreviews(true)}>Retry failed previews</button
+          >{/if}
+      </div>
+      <div class="preview-settings">
+        <strong>Library identities</strong>
+        <p>
+          Read full files in the background to check provisional duplicate
+          identities. Originals stay untouched.
+        </p>
+        <p class="mono">
+          {count(hashesDone)} / {count(hashesTotal)} verified{hashesFailed
+            ? ` · ${count(hashesFailed)} failed`
+            : ''}
+        </p>
+        <button
+          class="outline-button"
+          type="button"
+          disabled={analyzing ||
+            caching ||
+            embedding ||
+            !!busy ||
+            (!verifying && hashesDone + hashesFailed === hashesTotal)}
+          onclick={() => {
+            void invoke(verifying ? 'pause_verification' : 'start_verification')
+              .then(refreshStatus)
+              .catch(fail);
+          }}>{verifying ? 'Pause verification' : 'Verify identities'}</button
+        >
+        {#if hashesFailed}<button
+            class="outline-button"
+            type="button"
+            disabled={analyzing || caching || embedding || verifying || !!busy}
+            onclick={() => {
+              void invoke('start_verification', { retry: true })
+                .then(refreshStatus)
+                .catch(fail);
+            }}>Retry failed identities</button
           >{/if}
       </div>
       <label for="target-lufs">Target loudness (LUFS)</label><input

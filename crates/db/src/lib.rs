@@ -221,6 +221,7 @@ pub struct Sample {
 	pub root_id: i64,
 	pub available: bool,
 	pub tags: Vec<String>,
+	pub tag_paths: Vec<String>,
 	pub size: u64,
 }
 
@@ -328,12 +329,11 @@ pub fn browse(db: &Connection, request: &BrowseQuery) -> Result<Page> {
 		let id = row.get(0)?;
 		let rel: String = row.get(2)?;
 		let root: String = row.get(3)?;
-		let mut tags = db.prepare(
-			"SELECT t.name FROM tags t JOIN sample_tags st ON st.tag_id=t.id WHERE sample_id=?1 ORDER BY t.name",
-		)?;
-		let tags = tags
-			.query_map([id], |r| r.get(0))?
-			.collect::<std::result::Result<Vec<String>, _>>()?;
+		let mut statement = db.prepare("WITH RECURSIVE paths(id,name,path) AS (SELECT id,name,name FROM tags WHERE parent_id IS NULL UNION ALL SELECT t.id,t.name,p.path || '/' || t.name FROM tags t JOIN paths p ON t.parent_id=p.id) SELECT p.name,p.path FROM paths p JOIN sample_tags st ON st.tag_id=p.id WHERE sample_id=?1 ORDER BY p.name,p.path")?;
+		let pairs = statement
+			.query_map([id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+			.collect::<std::result::Result<Vec<_>, _>>()?;
+		let (tags, tag_paths) = pairs.into_iter().unzip();
 		results.push(Sample {
 			id,
 			size: row.get::<_, i64>(1)? as u64,
@@ -346,6 +346,7 @@ pub fn browse(db: &Connection, request: &BrowseQuery) -> Result<Page> {
 			root_id: row.get(4)?,
 			available: row.get(5)?,
 			tags,
+			tag_paths,
 		});
 	}
 	Ok(Page { items: results, total })
@@ -573,6 +574,22 @@ pub struct Job {
 	pub sample_id: i64,
 	pub kind: String,
 }
+pub fn claim_embedding_job(db: &Transaction<'_>) -> Result<Option<i64>> {
+	let id = db
+		.query_row(
+			"SELECT sample_id FROM jobs WHERE kind='embed' AND state='pending' ORDER BY priority DESC,sample_id LIMIT 1",
+			[],
+			|r| r.get::<_, i64>(0),
+		)
+		.optional()?;
+	if let Some(id) = id {
+		db.execute(
+			"UPDATE jobs SET state='running',attempts=attempts+1 WHERE sample_id=?1 AND kind='embed'",
+			[id],
+		)?;
+	}
+	Ok(id)
+}
 pub fn claim_analysis_job(db: &Transaction<'_>) -> Result<Option<Job>> {
 	let job=db.query_row("SELECT sample_id,kind FROM jobs j WHERE state='pending' AND (kind='analyze' OR (kind='peaks' AND NOT EXISTS(SELECT 1 FROM jobs a WHERE a.sample_id=j.sample_id AND a.kind='analyze' AND a.state IN ('pending','running')))) ORDER BY priority DESC,sample_id LIMIT 1",[],|r|Ok(Job {sample_id:r.get(0)?,kind:r.get(1)?})).optional()?;
 	if let Some(job) = &job {
@@ -622,7 +639,7 @@ pub fn tags(db: &Connection) -> Result<Vec<TagSummary>> {
 }
 pub fn remove_tag(db: &Transaction<'_>, id: i64, name: &str) -> Result<()> {
 	db.execute(
-		"DELETE FROM sample_tags WHERE sample_id=?1 AND tag_id IN (SELECT id FROM tags WHERE name=?2)",
+		"WITH RECURSIVE paths(id,path) AS (SELECT id,name FROM tags WHERE parent_id IS NULL UNION ALL SELECT t.id,p.path || '/' || t.name FROM tags t JOIN paths p ON t.parent_id=p.id) DELETE FROM sample_tags WHERE sample_id=?1 AND tag_id IN (SELECT id FROM paths WHERE path=?2)",
 		params![id, name],
 	)?;
 	rebuild_search(db, id)

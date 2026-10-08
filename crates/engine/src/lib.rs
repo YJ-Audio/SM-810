@@ -297,10 +297,25 @@ impl Engine {
 		})
 	}
 
+	pub fn retry_hash_failures(&self) -> Result<()> {
+		self.write(|tx| {
+			tx.execute(
+				"UPDATE jobs SET state='pending',error=NULL WHERE kind='full_hash' AND state='failed'",
+				[],
+			)?;
+			Ok(())
+		})
+	}
 	pub fn verify(&self, limit: usize) -> Result<usize> {
+		self.verify_until(limit, || false)
+	}
+	pub fn verify_until(&self, limit: usize, cancelled: impl Fn() -> bool) -> Result<usize> {
 		let _guard = self.scan_lock.try_lock().map_err(|_| Error::Busy)?;
 		let mut processed = 0;
 		for _ in 0..limit {
+			if cancelled() {
+				break;
+			}
 			let (sender, receiver) = mpsc::sync_channel(1);
 			self.write(move |tx| {
 				let id = db::claim_hash_job(tx)?;
@@ -398,3 +413,5 @@ pub mod query;
 pub mod maps;
 
 pub mod preview;
+
+pub mod watch;

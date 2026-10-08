@@ -18,6 +18,7 @@ export type Sample = {
   root_id: number;
   available: boolean;
   tags: string[];
+  tag_paths?: string[];
   size: number;
   analysis: Analysis | null;
   peaks: number[];
@@ -51,6 +52,7 @@ export type Bootstrap = {
   audio_error: string | null;
   analyzing: boolean;
   caching: boolean;
+  verifying: boolean;
   embedding: boolean;
   embedded: number;
   model_ready: boolean;

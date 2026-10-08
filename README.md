@@ -23,7 +23,7 @@ npm --prefix ui run tauri -- build --debug --bundles app
 
 生成先は `target/debug/bundle/macos/Sampler.app` です。開発用ビルドで、配布用の署名・公証は行っていません。Windows の実行ファイルは同じプロジェクトを Windows 上で `npm --prefix ui run tauri -- build --debug --no-bundle` により生成します。
 
-- Sources の「+」でフォルダを追加し、Analyze で解析します。既存の CLI データベースもそのまま開きます。
+- Sources の「+」でフォルダを追加し、Analyze で解析します。既存の CLI データベースもそのまま開きます。起動中はフォルダの変更を自動監視し、30秒間隔の再走査で通知漏れや再接続にも対応します。
 - 名前の部分一致、`#tag`、ソース／子孫タグを絞り込みに使えます。
 - Similarity index の Enable で約622MBの固定CLAPモデルを取得し、Index sounds で埋め込みを作ります。Pause・終了後も保存済みの続きから再開します。モデル取得後の推論は端末内で行います。
 - `~a deep punchy kick drum` のような自然文で、埋め込み済みの音を検索できます。インスペクタの類似上位5件はクリックで選択・試聴できます。選択後は類似度順を既定とし、↑↓中は並びを固定します。Sort で名前順にも戻せます。
@@ -33,6 +33,7 @@ npm --prefix ui run tauri -- build --debug --bundles app
 - Shift+クリックで範囲選択し、Tag selection でまとめてタグを付けられます。解析済みの BPM／キーはインスペクタで修正できます。
 - TagsのTag rulesでファイル名／パスの正規表現を登録できます。再適用しても手動タグを保持します。Collectionsの「+」で選択音の保存、または条件で更新されるスマートコレクションを作成できます。選択バーの+ Collectionから追加し、静的コレクションでは↑↓で順序を変更します。
 - Linkをオンにすると、解析上のループを次の4拍の小節頭から試聴します。テンポは設定で変更できます。再生中のタイムストレッチは行いません。
+- 設定のLibrary identitiesで全体ハッシュをバックグラウンド検証し、暫定的な重複判定の衝突を分割できます。Pause・再開・失敗の再試行に対応します。
 - 設定のFast previewsで対象音声の先頭1秒をローカルのpreview.packへキャッシュできます。Pause・再起動から再開でき、失敗だけ再試行できます。追加時のStorage指定が対象を決めます。
 - Match LUFS、目標 LUFS、±24 半音の移調に対応します。波形は元ファイルの時間軸を表示します。
 - 行または下部波形のドラッグで元ファイルを渡します。両端ハンドルで範囲を調整し、Drag slice から永続 WAV を渡します。初期の全範囲は Prepare slice を押すと書き出せます。

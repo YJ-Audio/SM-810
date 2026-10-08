@@ -749,3 +749,103 @@ fn preview_pack_is_persistent_append_only_and_available_without_source_io() {
 	let engine = Engine::open(&path).unwrap();
 	assert!(engine.preview(long).is_err());
 }
+
+#[test]
+fn embedding_claims_ignore_preview_jobs_and_tag_removal_uses_exact_hierarchy() {
+	let dir = tempfile::tempdir().unwrap();
+	let source = dir.path().join("sounds");
+	fs::create_dir(&source).unwrap();
+	fs::write(source.join("a.wav"), b"fixture").unwrap();
+	let engine = Engine::open(dir.path().join("db")).unwrap();
+	let root = engine.add_root(&source, "Test", Storage::Network).unwrap();
+	engine.scan(root).unwrap();
+	let id = engine.search("", 1, 0).unwrap()[0].id;
+	engine.tag(id, "Drums/kick").unwrap();
+	engine.tag(id, "Mood/kick").unwrap();
+	engine.remove_tag(id, "Drums/kick".into()).unwrap();
+	assert_eq!(engine.search("", 1, 0).unwrap()[0].tag_paths, ["Mood/kick"]);
+	let (send, recv) = std::sync::mpsc::sync_channel(1);
+	engine
+		.write(move |tx| {
+			assert_eq!(sampler_db::claim_embedding_job(tx)?, Some(id));
+			assert_eq!(sampler_db::claim_embedding_job(tx)?, None);
+			tx.execute("UPDATE jobs SET state='done' WHERE kind='embed'", [])?;
+			assert_eq!(sampler_db::claim_embedding_job(tx)?, None);
+			let preview: String = tx.query_row(
+				"SELECT state FROM jobs WHERE kind='preview_cache' AND sample_id=?1",
+				[id],
+				|r| r.get(0),
+			)?;
+			let _ = send.send(preview);
+			Ok(())
+		})
+		.unwrap();
+	assert_eq!(recv.recv().unwrap(), "pending");
+}
+
+#[test]
+fn desktop_watcher_rescans_changes_and_restores_offline_roots() {
+	use sampler_engine::{
+		organize::{Rule, RuleTarget},
+		watch::LibraryWatch,
+	};
+	use std::{sync::Arc, time::Duration};
+	let dir = tempfile::tempdir().unwrap();
+	let source = dir.path().join("sounds");
+	fs::create_dir(&source).unwrap();
+	fs::write(source.join("Kick.wav"), b"original kick").unwrap();
+	let engine = Arc::new(Engine::open(dir.path().join("library.db")).unwrap());
+	engine.add_root(&source, "External", Storage::External).unwrap();
+	engine
+		.save_rule(Rule {
+			id: None,
+			tag: "Drums/kick".into(),
+			target: RuleTarget::Filename,
+			pattern: "(?i)kick".into(),
+			enabled: true,
+		})
+		.unwrap();
+	// Zero interval exercises the fallback without depending on OS event timing.
+	let mut watcher = LibraryWatch::new(engine.clone(), Duration::ZERO);
+	assert_eq!(watcher.tick().unwrap()[0].files, 1);
+	let id = engine.search("", 10, 0).unwrap()[0].id;
+	engine.tag(id, "Keep/manual").unwrap();
+	fs::rename(source.join("Kick.wav"), source.join("Kick_renamed.wav")).unwrap();
+	fs::write(source.join("Hat.wav"), b"distinct hat").unwrap();
+	assert_eq!(watcher.tick().unwrap()[0].files, 2);
+	let kick = engine.search("Kick_renamed", 1, 0).unwrap().remove(0);
+	assert_eq!(kick.id, id);
+	assert_eq!(kick.tag_paths, ["Drums/kick", "Keep/manual"]);
+	assert_eq!(engine.verify_until(10, || true).unwrap(), 0);
+	assert_eq!(engine.verify(10).unwrap(), 2);
+	fs::write(source.join("Snare.wav"), b"pending verification").unwrap();
+	assert_eq!(watcher.tick().unwrap()[0].files, 3);
+	let offline = dir.path().join("disconnected");
+	fs::rename(&source, &offline).unwrap();
+	assert_eq!(watcher.tick().unwrap()[0].status, "offline");
+	assert!(engine.search("", 10, 0).unwrap().iter().all(|s| !s.available));
+	assert_eq!(engine.verify(10).unwrap(), 1);
+	assert!(
+		engine
+			.jobs()
+			.unwrap()
+			.iter()
+			.any(|j| j.kind == "full_hash" && j.state == "failed" && j.count == 1)
+	);
+	fs::rename(&offline, &source).unwrap();
+	assert_eq!(watcher.tick().unwrap()[0].status, "online");
+	engine.retry_hash_failures().unwrap();
+	assert_eq!(engine.verify(10).unwrap(), 1);
+	assert!(
+		!engine
+			.jobs()
+			.unwrap()
+			.iter()
+			.any(|j| j.kind == "full_hash" && j.state == "failed")
+	);
+	let restored = engine.search("Kick_renamed", 1, 0).unwrap().remove(0);
+	assert_eq!(restored.id, id);
+	assert!(restored.available);
+	assert_eq!(restored.tag_paths, kick.tag_paths);
+	assert_eq!(fs::read(source.join("Kick_renamed.wav")).unwrap(), b"original kick");
+}

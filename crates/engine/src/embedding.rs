@@ -2,7 +2,7 @@ use crate::{
 	Engine, Error, Result,
 	desktop::{Page, Row},
 };
-use sampler_db::{self as db, OptionalExtension};
+use sampler_db as db;
 use sampler_embed::{DIMENSIONS, DIRECTORY, MODEL, Model};
 use sampler_similarity::{Hit, Store};
 use std::{
@@ -133,19 +133,7 @@ impl Engine {
 			}
 			let (sender, receiver) = mpsc::sync_channel(1);
 			self.write(move |tx| {
-				let id = tx
-					.query_row(
-						"SELECT sample_id FROM jobs WHERE kind IN ('embed','preview_cache') AND state='pending' ORDER BY priority DESC,sample_id LIMIT 1",
-						[],
-						|r| r.get::<_, i64>(0),
-					)
-					.optional()?;
-				if let Some(id) = id {
-					tx.execute(
-						"UPDATE jobs SET state='running',attempts=attempts+1 WHERE sample_id=?1 AND kind='embed'",
-						[id],
-					)?;
-				}
+				let id = db::claim_embedding_job(tx)?;
 				let _ = sender.send(id);
 				Ok(())
 			})?;

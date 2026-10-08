@@ -20,6 +20,8 @@ struct App {
 	audio_error: Option<String>,
 	analyzing: Arc<AtomicBool>,
 	caching: Arc<AtomicBool>,
+	verifying: Arc<AtomicBool>,
+	pause_verifying: Arc<AtomicBool>,
 	pause_caching: Arc<AtomicBool>,
 	embedding: Arc<AtomicBool>,
 	pause_embedding: Arc<AtomicBool>,
@@ -47,6 +49,7 @@ async fn bootstrap(state: State<'_, App>) -> Reply {
 	let audio_error = state.audio_error.clone();
 	let analyzing = state.analyzing.load(Ordering::Acquire);
 	let caching = state.caching.load(Ordering::Acquire);
+	let verifying = state.verifying.load(Ordering::Acquire);
 	let embedding = state.embedding.load(Ordering::Acquire);
 	let downloading = state.downloading.load(Ordering::Acquire);
 	let download_bytes = state.download_bytes.load(Ordering::Relaxed);
@@ -61,7 +64,7 @@ async fn bootstrap(state: State<'_, App>) -> Reply {
 			"tags": engine.tags().map_err(|e| e.to_string())?,
 			"jobs": engine.jobs().map_err(|e| e.to_string())?,
 			"audio_error": audio_error,
-			"analyzing": analyzing, "caching": caching,
+			"analyzing": analyzing, "caching": caching, "verifying": verifying,
 			"embedding": embedding, "model_ready": engine.model_ready(), "embedded": engine.embedding_count(),
 			"downloading": downloading, "download_bytes": download_bytes, "download_total": download_total,
 		}))
@@ -123,6 +126,31 @@ fn playback_status(state: State<'_, App>) -> Reply {
 		.as_ref()
 		.map(|audio| json!(audio.status()))
 		.unwrap_or_else(|| json!({"playing":false,"sample_id":0,"seconds":0,"error":state.audio_error})))
+}
+#[tauri::command]
+fn pause_verification(state: State<'_, App>) {
+	state.pause_verifying.store(true, Ordering::Release);
+}
+#[tauri::command]
+fn start_verification(app: tauri::AppHandle, state: State<'_, App>, retry: Option<bool>) -> Result<(), String> {
+	if state.verifying.swap(true, Ordering::AcqRel) {
+		return Ok(());
+	}
+	state.pause_verifying.store(false, Ordering::Release);
+	let engine = state.engine.clone();
+	let active = state.verifying.clone();
+	let pause = state.pause_verifying.clone();
+	std::thread::spawn(move || {
+		let result = (|| {
+			if retry.unwrap_or(false) {
+				engine.retry_hash_failures()?;
+			}
+			engine.verify_until(usize::MAX, || pause.load(Ordering::Acquire))
+		})();
+		active.store(false, Ordering::Release);
+		let _ = app.emit("library-updated", result.err().map(|e| e.to_string()));
+	});
+	Ok(())
 }
 #[tauri::command]
 async fn retry_preview_failures(state: State<'_, App>) -> Reply {
@@ -407,6 +435,8 @@ fn main() {
 				audio_error,
 				analyzing: Arc::new(AtomicBool::new(false)),
 				caching: Arc::new(AtomicBool::new(false)),
+				verifying: Arc::new(AtomicBool::new(false)),
+				pause_verifying: Arc::new(AtomicBool::new(false)),
 				pause_caching: Arc::new(AtomicBool::new(false)),
 				embedding: Arc::new(AtomicBool::new(false)),
 				pause_embedding: Arc::new(AtomicBool::new(false)),
@@ -425,11 +455,25 @@ fn main() {
 			}
 			let handle = app.handle().clone();
 			std::thread::spawn(move || {
+				let mut watcher = sampler_engine::watch::LibraryWatch::new(
+					handle.state::<App>().engine.clone(),
+					Duration::from_secs(30),
+				);
 				loop {
 					std::thread::sleep(Duration::from_secs(2));
 					let state = handle.state::<App>();
+					match watcher.tick() {
+						Ok(reports) if !reports.is_empty() => {
+							let _ = handle.emit("library-updated", ());
+						}
+						Err(error) => {
+							let _ = handle.emit("library-updated", Some(error.to_string()));
+						}
+						_ => {}
+					}
 					if state.analyzing.load(Ordering::Acquire)
 						|| state.caching.load(Ordering::Acquire)
+						|| state.verifying.load(Ordering::Acquire)
 						|| state.embedding.load(Ordering::Acquire)
 						|| state.downloading.load(Ordering::Acquire)
 					{
@@ -454,6 +498,8 @@ fn main() {
 			snap_slice,
 			prepare_drag,
 			start_analysis,
+			start_verification,
+			pause_verification,
 			start_caching,
 			pause_caching,
 			retry_preview_failures,
@@ -482,6 +528,7 @@ fn main() {
 				let state = app.state::<App>();
 				state.layout_cancel.store(true, Ordering::Release);
 				state.pause_caching.store(true, Ordering::Release);
+				state.pause_verifying.store(true, Ordering::Release);
 				// Reap the sidecar before the process exits so cancelled work cannot remain orphaned.
 				for _ in 0..100 {
 					if state.layout_active.load(Ordering::Acquire) == 0 {
