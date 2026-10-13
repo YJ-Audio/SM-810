@@ -25,7 +25,7 @@
 
 ## ソースから起動する
 
-Node.js 22.12以上、npm 11、Rust、[各OSのTauri開発環境](https://v2.tauri.app/start/prerequisites/)、CMake、libclangが必要です。Rustのバージョンは`rust-toolchain.toml`で指定しています。
+Node.js 22.12以上、pnpm（バージョンは`package.json`で指定）、Rust、[各OSのTauri開発環境](https://v2.tauri.app/start/prerequisites/)、CMake、libclangが必要です。Rustのバージョンは`rust-toolchain.toml`で指定しています。
 
 WindowsではVisual Studio Build Toolsの「C++によるデスクトップ開発」をインストールし、libclang.dllのあるディレクトリを設定してください。LLVMを標準の場所にインストールした場合:
 
@@ -33,11 +33,12 @@ WindowsではVisual Studio Build Toolsの「C++によるデスクトップ開発
 $env:LIBCLANG_PATH = 'C:\Program Files\LLVM\bin'
 ```
 
-リポジトリのルートで実行します。
+リポジトリのルートで実行します。Node.jsとpnpmは`mise install`でも導入できます。
+ルートと`ui/`はpnpm workspaceで管理し、依存関係のインストールと各コマンドはルートから実行します。
 
 ```sh
-npx --yes npm@11 --prefix ui ci
-npm --prefix ui run tauri -- dev
+pnpm install
+pnpm tauri dev
 ```
 
 ## ビルドする
@@ -45,7 +46,7 @@ npm --prefix ui run tauri -- dev
 Windows 10／11（x64）のインストーラー:
 
 ```powershell
-npm --prefix ui run build:windows
+pnpm build:windows
 ```
 
 `target/release/bundle/nsis/`に生成されます。必要なランタイムを同梱し、現在のユーザー向けにインストールします。WebView2がない場合はセットアップ中に取得します。インストーラーは未署名です。
@@ -53,7 +54,7 @@ npm --prefix ui run build:windows
 macOSのアプリバンドル:
 
 ```sh
-npm --prefix ui run tauri -- build --debug --bundles app
+pnpm tauri build --debug --bundles app
 ```
 
 `target/debug/bundle/macos/Sampler.app`に生成されます。開発用ビルドで、署名・公証は行っていません。

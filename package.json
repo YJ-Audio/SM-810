@@ -1,0 +1,23 @@
+{
+  "name": "sm-810",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "packageManager": "pnpm@12.10.1",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "dev": "pnpm --filter sampler-ui dev",
+    "build": "pnpm --filter sampler-ui build",
+    "check": "pnpm --filter sampler-ui check",
+    "test": "pnpm --filter sampler-ui test",
+    "format": "pnpm --filter sampler-ui format",
+    "tauri": "tauri",
+    "prepare-layout": "node tools/layout/build.mjs",
+    "build:windows": "node tools/windows/build.mjs"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.12.1"
+  }
+}

@@ -103,7 +103,7 @@ DB: OS アプリデータ領域の `studio.poti.sampler/library.sqlite3`。元�
 
 ## 2026-10-09 — Windows x64対応
 
-- [x] Windows専用のTauri設定、ICO、ユーザー単位のNSISインストーラー生成を追加。`npm --prefix ui run build:windows`でreleaseビルド後にDirectML、ONNX Runtimeの追加DLL、Visual C++ランタイムを収集し、Map再計算用サイドカーと同梱する。署名は未実施。
+- [x] Windows専用のTauri設定、ICO、ユーザー単位のNSISインストーラー生成を追加。`pnpm build:windows`でreleaseビルド後にDirectML、ONNX Runtimeの追加DLL、Visual C++ランタイムを収集し、Map再計算用サイドカーと同梱する。署名は未実施。
 - [x] 相対パスの区切りを`/`で保存し、ファイル名ルールにフォルダ名が混入しないよう修正。日本語と空白を含む入れ子フォルダで回帰テストを追加。Windowsで禁止される引用符を含むテストファイル名も修正。
 - [x] Windowsで追記専用ハンドルへのファイルロックが失敗していた先頭PCMキャッシュを修正。読み取り権限も付けて開く。追記、再マップ、再起動、元音声の切断後の読み出しを既存回帰テストで確認。
 - [x] Mapサイドカーのコンソール表示を抑止。Windowsの検索ショートカット表示をCtrl Kへ変更。

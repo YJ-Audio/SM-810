@@ -519,10 +519,7 @@ fn maps_persist_positions_and_dim_filters_without_moving_points() {
 					"sampler-layout"
 				})
 		});
-	assert!(
-		sidecar.exists(),
-		"Run npm --prefix ui run prepare-layout before workspace tests"
-	);
+	assert!(sidecar.exists(), "Run pnpm prepare-layout before workspace tests");
 	engine.recompute_map(id, &sidecar, || false).unwrap();
 	assert_eq!(engine.map_summary(id).unwrap().layout_rev, 1);
 	assert_eq!(engine.map_summary(id).unwrap().provisional, 0);

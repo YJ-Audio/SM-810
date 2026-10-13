@@ -4,9 +4,9 @@
   "version": "0.1.0",
   "identifier": "studio.poti.sampler",
   "build": {
-    "beforeDevCommand": "npm run prepare-layout && npm run dev",
+    "beforeDevCommand": "pnpm prepare-layout && pnpm dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "npm run prepare-layout && npm run build",
+    "beforeBuildCommand": "pnpm prepare-layout && pnpm build",
     "frontendDist": "../ui/dist"
   },
   "app": {
